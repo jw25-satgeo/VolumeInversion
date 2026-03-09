@@ -248,7 +248,7 @@ def CMopt(qpol1, qpol2, window=3, device='cuda', dtype=torch.complex64):
 # "A phase-decomposition-based polarimetric coherence optimization method"
 # src: Zhang et al. (2022) https://www.sciencedirect.com/science/article/pii/S0303243422000976
 def PD_PCO(qpol1, qpol2, iterations=20, lr=0.05, window=3, device='cuda', dtype=torch.complex64):
-    'returns the optimal intensity projection for maximum phase consistency across images.'
+    'returns the optimal intensity projection for maximum phase consistency across images. (WARNING - NOT CORRECTLY IMPLEMENTED [go to PolarDecompDual for correct version])'
     pauli = torch.stack((Pauli(qpol1, device=device, dtype=dtype), Pauli(qpol2, device=device, dtype=dtype)), dim=-1)
     H, W, B, N = pauli.shape
 
