@@ -1,0 +1,7 @@
+GAS_PHASE 1  Air
+-fixed_pressure
+-pressure 1.0
+-temperature 25.0
+CO2(g) 0.000316
+O2(g) 0.2
+N2(g)  0.78

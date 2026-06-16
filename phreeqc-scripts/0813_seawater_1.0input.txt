@@ -1,0 +1,12 @@
+SOLUTION 1 Seawater-like composition
+    temp      0.0      # Starting temperature in °C (to be changed each run)
+    pH        8.0
+    pressure  1
+    water     1  # kg
+    units     mol/kgw
+    Na        0.468    # ~35 PSU salinity (mol/kgw basis)
+    Cl        0.545
+    Mg        0.052
+    SO4       0.028
+    Ca        0.010
+    K         0.010

@@ -1,0 +1,8 @@
+
+SELECTED_OUTPUT
+    -temperature true
+    -totals      Na Cl Mg SO4 Ca K
+    -pH          true
+    -molalities  H2O
+#    -si          Ice(s)
+    -equilibrium_phases Ice(s) #Halite Hydrohalite Sylvite Antarcticite Bischofite MgCl2:8H2O MgCl2:12H2O Carnallite Anhydrite Arcanite Epsomite Gypsum Mirabilite Picromerite
