@@ -13,6 +13,10 @@ import h5py
 from osgeo import gdal, osr, gdal_array
 #GDAL ref : https://gdal.org/en/stable/doxygen/classGDALDataset.html
 
+'''
+This data access module compiles and processes Sentinel-1 TOPS BURST files and organizes them into stacks for time-series analysis.
+'''
+
 def srs_llh2xyz(srs, lat, lon, h=0): # h : radial height
     a, f = srs.GetSemiMajor(), 1/srs.GetInvFlattening()  # ellipsoid parameters
     e2 = f*(2 - f) # eccentricity squared

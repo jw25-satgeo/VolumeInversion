@@ -1,0 +1,253 @@
+k = torch.arange(Om.shape[0], device=device)
+    i = ((2*N - 1 - torch.sqrt((2*N-1)**2 - 8*k)) // 2
+    j = i + 1 + (k - i*(2*N - i - 1)//2)
+
+def pdopt_pixel(tm, om, numph=60, reg=0.0):
+    """Phase diversity coherence optimization for a single pixel.
+    
+    Same functionality as the pdopt function above, but for a single pixel
+    only.  This is the function called when plotting a coherence region.
+    
+    Arguments:
+        tm (array): The polarimetric covariance (T) matrix of the data,
+            with dimensions: [num_pol, num_pol].  Note that in the
+            HDF5 file, covariance matrix elements below the diagonal are
+            zero-valued, in order to save disk space.  The (j,i) elements
+            should therefore calculated from the complex conjugate of the
+            (i,j) elements using the kapok.lib.makehermitian() function before
+            the matrix is passed to this function.  Note: This should be the
+            average matrix of the two tracks forming the baseline, assuming
+            polarimetric stationarity.
+        om (array): The polarimetric interferometric (Omega) matrix of the
+            data, with dimensions [num_pol, num_pol].
+        numph (int): The number of phase shifts to calculate coherences for.
+            The higher the number, the smaller the spacing of the coherences
+            around the coherence region perimeter.  The smaller the number,
+            the faster the computation time.  Default: 30.
+        reg (float): Regularization factor.  The tm matrix is added to
+            the matrix reg*Tr(tm)*I, where Tr(tm) is the trace of tm, and I
+            is the identity matrix.  Similarly, the omega matrix is added to
+            the matrix reg*Tr(om)*I.  This regularization reduces the spread
+            of the coherence region for pixels where the backscatter is
+            highly polarization dependent.
+    
+    Returns:
+        gammamax (complex): the optimized coherence with the max eigenvalue.
+        gammamin (complex): the optimized coherence with the min eigenvalue.
+        gammaregion (array): Every coherence from the solved eigenvalue
+            problems.  These coherences will lie around the edge of the
+            coherence region.
+    
+    """   
+    cohdiff = 0
+    gammaregion = np.empty((numph*2 + 1),dtype='complex')
+    
+    # Matrix regularization: 
+    if reg > 0:
+        tm = tm + reg*np.trace(tm)*np.eye(3)
+        om = om + reg*np.trace(om)*np.eye(3)
+
+
+    for Ph in range(0,numph): # loop through rotation angles
+        Pr = Ph * np.pi / numph # phase shift to be applied
+        
+        
+        # Apply phase shift to omega matrix:
+        z12 = om.copy()*np.exp(1j*Pr)
+        z12 = 0.5 * (z12 + np.transpose(np.conj(z12)))
+        
+
+        # Solve the eigenvalue problem:                
+        nu, w = linalg.eig(np.dot(linalg.inv(tm),z12))
+                
+        wH = np.transpose(np.conj(w))
+        
+        Tmp = np.dot(om,w)
+        Tmp12 = np.dot(wH,Tmp)
+        
+        Tmp = np.dot(tm,w)
+        Tmp11 = np.dot(wH,Tmp)
+        
+        l = np.argmin(nu)
+        gmin = Tmp12[l,l] / np.abs(Tmp11[l,l]) # min eigenvalue coherence
+        
+        l = np.argmax(nu)
+        gmax = Tmp12[l,l] / np.abs(Tmp11[l,l]) # max eigenvalue coherence
+        
+        gammaregion[Ph] = gmin
+        gammaregion[Ph+numph] = gmax
+        
+        if (np.abs(gmax-gmin) > cohdiff):
+            cohdiff = np.abs(gmax-gmin)
+            gammamax = gmax
+            gammamin = gmin
+
+    gammaregion[-1] = gammaregion[0] # copy the first coherence to the end of the array, for a continuous coherence region plot
+    
+    return gammamax, gammamin, gammaregion
+
+
+
+
+
+
+#o4 = torch.nn.parameter.Parameter(torch.zeros((H, W, B), dtype=T11.dtype).to(device))
+    #clmp = torch.pi * torch.tensor([[0,0,-1,-1],[1/2,1,1,1]],device=device))[:,None,None,:] #clamp: 2,H,W,B
+    #w_proj = torch.zeros((H,W,(pauli.shape[:3])), dtype=T11.dtype).to(device) #complex projective unit radius
+    # torch.clamp(w_proj.real, clmp[0], clmp[1])
+
+
+
+T3b[...,0,1] = T3[...,0,1]*torch.cos(tr) + T3[...,0,2]*torch.sin(tr)
+    T3b[...,0,2] = -T3[...,0,1]*torch.sin(tr) + T3[...,0,2]*torch.cos(tr)
+    T3b[...,1,2] = T3[...,1,2].imag * 1j
+    T3b[...,1,1] = T3[...,1,1]*torch.cos(tr)**2 + T3[...,2,2]*torch.sin(tr)**2 + T3[...,1,2].real*torch.sin(2*tr)
+    T3b[...,2,2] = T3[...,2,2]*torch.cos(tr)**2 + T3[...,1,1]*torch.sin(tr)**2 - T3[...,1,2].real*torch.sin(2*tr)
+
+    T3b[...,0,1] = T3[...,0,1]*torch.cos(ti) + T3[...,0,2]*torch.sin(ti)
+    T3b[...,0,2] = -T3[...,0,1]*torch.sin(ti) + T3[...,0,2]*torch.cos(ti)
+    T3b[...,1,2] = 0
+    T3b[...,1,1] = T3[...,1,1]*torch.cos(ti)**2 + T3[...,2,2]*torch.sin(ti)**2 + T3[...,1,2].imag*torch.sin(2*ti)
+    T3b[...,2,2] = T3[...,2,2]*torch.cos(ti)**2 + T3[...,1,1]*torch.sin(ti)**2 - T3[...,1,2].real*torch.sin(2*ti)
+
+
+
+
+
+# PERFORM SNAP COREGISTRATION TO generate 'stk' PRODUCT
+from esa_snappy import ProductIO, GPF, HashMap, jpy
+
+s1 = ProductIO.readProduct(s1_fn)
+s2 = ProductIO.readProduct(s2_fn)
+
+GPF.getDefaultInstance().getOperatorSpiRegistry().loadOperatorSpis()
+ops = GPF.getDefaultInstance().getOperatorSpiRegistry().getOperatorSpis()
+
+bands = 'i_HH,q_HH,i_HV,q_HV,i_VH,q_VH,i_VV,q_VV'
+
+# 1. ALOS Deskew
+params = HashMap()
+params.put('sourceBands', bands)
+params.put('demName', 'Copernicus 30m Global DEM')
+s1a = GPF.createProduct('ALOS-Deskewing', params, s1)
+s2a = GPF.createProduct('ALOS-Deskewing', params, s2)
+
+# 2. Calibration ( radiometric -> Faraday (polar) -> Orientation (polar) )
+params = HashMap()
+params.put('sourceBands', bands)
+params.put('outputImageInComplex', True)
+s1b = GPF.createProduct('Calibration', params, s1a) #per-image calibration factor application using satellite specific algorithms
+s2b = GPF.createProduct('Calibration', params, s2a)
+params = HashMap()
+params.put('window', 10)
+s1b = GPF.createProduct('Faraday-Rotation-Correction', params, s1b) # corrects rotation of polarization ellipse by magnetosphere
+s2b = GPF.createProduct('Faraday-Rotation-Correction', params, s2b)
+
+# 3. Coregistration
+params = HashMap()
+params.put('resamplingType', 'BILINEAR_INTERPOLATION')
+params.put('extent', 'Master')
+params.put('initialOffsetMethod', 'Product Geolocation')
+stk = GPF.createProduct('CreateStack', params, [s1b,s2b])
+stk = GPF.createProduct('Cross-Correlation', HashMap(), stk)
+params = HashMap()
+params.put('interpolationMethod','Bilinear interpolation')
+stk = GPF.createProduct('Warp', params, stk)
+
+# get metadata
+tmp = stk.getMetadataRoot().getElement('Abstracted_Metadata').getElement('Baselines')
+baseline = tmp.getElements()[0].getElements()[1].getAttributes()[0].getData().getElemFloat()
+wavelength = 0.235
+
+#NETCDF4 can be written to using a separate interpretation method outside the SNAP API, and safely re-imported.
+ProductIO.writeProduct(stk, '/mnt/c/Users/user/Desktop/slc_cache/tmp/ALOS-P1_1__A-ORBIT__ALPSRPstack', 'NETCDF4-BEAM')
+
+
+-----------------------------------------------------------
+
+# 3.1 BandMaths k_z
+params = HashMap()
+targets = jpy.array('org.esa.snap.core.gpf.common.BandMathsOp$BandDescriptor', 1)
+BM_BandDescriptor = jpy.get_type('org.esa.snap.core.gpf.common.BandMathsOp$BandDescriptor')
+tmp = BM_BandDescriptor()
+tmp.name = 'k_z'
+tmp.type = 'float32'
+tmp.expression = f'4 * {np.pi} *  {baseline} / ({wavelength} * 299792458 * slant_range_time * sin(incident_angle))'
+tmp.noDataValue = 0
+tmp.spectralBandIndex = 10
+targets[0] = tmp
+'''variables = jpy.array('org.esa.snap.core.gpf.common.BandMathsOp$Variable', 3)
+BM_Variable = jpy.get_type('org.esa.snap.core.gpf.common.BandMathsOp$Variable')
+tmp = BM_Variable()
+tmp.name = 'BASELINE'
+tmp.type = 'float32'
+tmp.value = str(baseline)
+variables[0] = tmp
+tmp = BM_Variable()
+tmp.name = 'WAVELENGTH'
+tmp.type = 'float32'
+tmp.value = str(wavelength)
+variables[1] = tmp'''
+params.put('targetBands', targets)
+#params.put('variables', variables)
+#params.put('copySourceBands', True)
+kz2 = GPF.createProduct('BandMaths', params, stk)
+
+
+#s1b = GPF.createProduct('Orientation-Angle-Correction', HashMap(), s1b) # corrects alteration of polarization ellipse by slopes
+#s2b = GPF.createProduct('Orientation-Angle-Correction', HashMap(), s2b)
+
+
+# 4. Subset
+do_subset = False
+if(do_subset):
+    tmp = [band for band in stk.getBands() if 'slv' in band.getName()][0]
+    w, h = tmp.getRasterWidth(), tmp.getRasterHeight(); tmp1 = np.zeros((w,h))
+    tmp1 = tmp.readPixels(0, 0, w, h, tmp1) != 0 # find first and last indices w. nonzero values on x(width) and y(height) axis
+    tmp2 = np.cumsum(tmp1.any(axis=1))
+    x1, x2 = np.where((tmp2 == tmp2.min()) + (tmp2 == tmp2.max()))[0][0:2]
+    tmp2 = np.cumsum(tmp1.any(axis=0))
+    y1, y2 = np.where((tmp2 == tmp2.min()) + (tmp2 == tmp2.max()))[0][0:2]
+    print('located subset bounds:', x1,x2,y1,y2)
+    params = HashMap()
+    params.put('region',f"{x1},{y1},{x2-x1},{y2-y1}")
+    params.put('copyMetadata',True)
+    stk_crop = GPF.createProduct('Subset', params, stk)
+
+# 5.1 OPT: Multilooking
+do_multilooking = False
+if (do_multilooking):
+    params = HashMap()
+    params.put('nRgLooks',3)
+    params.put('nAzLooks',3)
+    params.put('sourceBands', bands)
+    params.put('outputIntensity',False)
+    s1b = GPF.createProduct('Multilook', params, s1b)
+    s2b = GPF.createProduct('Multilook', params, s2b)
+
+
+
+
+# 6. Terrain Correction (geoprojection)
+#params = HashMap()
+#params.put('nodataValueAtSea', False)
+#params.put('saveLatLon', True)
+#params.put('saveIncidenceAngleFromEllipsoid', True)
+#params.put('outputComplex', True)
+#coh_tc = GPF.createProduct('', params, coh)
+
+# 4. Interferogram + baseline
+#params = HashMap()
+#params.put('subtractFlatEarthPhase', True)
+#ingm = GPF.createProduct('Interferogram', params, stk)
+
+#C = 299792458.0
+#DEFAULT_WAVELENGTH = 0.235  # m (ALOS-1 PALSAR ~ L-band)
+#baseline = ingm.getMetadataRoot().getElement('Baseline').getAttributeDouble('perpendicularBaseline',0.0)
+#ia = s1b.getTiePointGrid('incident_angle'); print(type(ia))
+#sr = s1b.getTiePointGrid('slant_range_time'); print(type(sr))
+
+
+# figure out how to turn this into a k_z tie point grid
+
+# 5. Export

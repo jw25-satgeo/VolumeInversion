@@ -1,0 +1,7 @@
+So you know how this is on an external mounted drive? Well it turns out isce uses dbm, which happens to apparently try and chmod a bloody file when closing it for... r e a sons.
+
+So I went into \\wsl.localhost\Ubuntu\home\adminix\sgconda\envs\isce2\lib\python3.10\dbm and commented out that line.
+
+Fun!
+
+Don't copy over that env to anyone else, I guess.

@@ -1,0 +1,51 @@
+
+## An effort to make a lattice obey floquet-bloch constraints - too unstable.
+
+#pads = []
+    #for i in range(2,5):
+    #    Nb, errb = erc.shape[i], 2
+    #    if i-2 in floquet and kI[i-2] != 0:
+    #        for N in range(erc.shape[i], 2*erc.shape[i]):
+    #            err = 0.25*(kI[i-2]*N)*torch.abs(torch.sin(kI[i-2]*N/2))
+    #            if (err < errb): Nb, errb = N, err
+    #            if (err < floquet_err): break
+    #        if (errb > floquet_err): print (f'axis {i-2} cell periodicity error above minimum at {errb}')
+    #    pads += [0, Nb - erc.shape[i]]
+    #er = F.pad(erc, tuple(pads[::-1]), mode='circular')
+
+
+##   A way to take scattering read-plane from LBM4S and make a nice animation.
+
+scatter_animdata = scatter[100:200,...,1,0].cpu().numpy()
+
+from matplotlib import animation
+from IPython.display import HTML
+fig = plt.figure()
+def anim_func(t):
+    return plt.imshow(scatter_animdata[t])
+ani = animation.FuncAnimation(fig, anim_func, frames=scatter_animdata.shape[0])
+#HTML(ani.to_html5_video())
+from matplotlib.animation import FFMpegWriter
+writer = FFMpegWriter(fps=15, metadata=dict(artist='jawonl'), bitrate=400)
+ani.save("surf_backscatter_field_HH.gif", writer=writer)
+
+
+
+##   A basic porosity cluster-finding algorithm
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+poro = torch.rand((1,1,30,30,30)) < 0.1
+dtype, device = torch.float32, 'cpu'
+N,C,Li,Wi,Di = poro.shape
+percol = ((torch.rand((1,1,Li,Wi,Di),device=device) < 0.1) * poro).to(torch.float16) # select with 10% chance a gas or brine cell
+percol[percol > 0] = torch.arange((percol > 0).sum()).to(torch.float16)
+
+for i in range(20):
+    nb = F.max_pool3d(percol, kernel_size=3, stride=1, padding=1)
+    propo = poro * (nb > 0) * (percol==0) > 0
+    percol[propo > 0] = nb[propo]
+
+plt.imshow(percol[0,0,10].detach().cpu().numpy()); plt.title('clusters'); plt.colorbar(); plt.show()
+plt.imshow(poro[0,0,10].detach().cpu().numpy()); plt.title('porosity'); plt.colorbar(); plt.show()

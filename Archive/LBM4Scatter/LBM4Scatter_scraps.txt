@@ -1,0 +1,10 @@
+    # Phase difference (note : hilbert op needs even-length input .. crop start & end to avoid instability)
+    #pdff = (hilbert2phase(scatter[:2*(T//2)])[T//4:3*T//4] - hilbert2phase(driver[:2*(T//2)])[T//4:3*T//4][...,None,None]).mean(dim=0)
+    # Amplitude factor : ratio of sum of square root of power over envelope .. assumes constant power
+    #ampf = torch.abs(scatter[T//4:3*T//4]).sum(dim=0) / torch.abs(driver[T//4:3*T//4]).sum(dim=0)[...,None,None]
+def hilbert2phase(x):
+    y = -1j * torch.fft.rfft(x, dim=0); y[0] = 0;
+    y = torch.fft.irfft(y, dim=0) #hilbert transform
+    y = torch.angle(torch.complex(x, y)) # get phase
+    y[1:] += torch.cumsum(y[1:] < y[:-1] - 1.9*torch.pi, dim=0) * 2*torch.pi #unwrap phase
+    return y

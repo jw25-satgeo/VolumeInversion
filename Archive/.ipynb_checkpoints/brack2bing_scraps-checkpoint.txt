@@ -1,0 +1,11 @@
+        #mean_kern = torch.ones(window, device=device, dtype=dtype) / torch.as_tensor(window, dtype=dtype, device=device).prod()
+        #mean_kern = mean_kern[None,None,...].expand(C,1,-1,-1,-1)
+        #kern_pad = [[el//2, el//2] for el in window]
+
+        S = ox.copy(); S[ox < 0] = 0; S = F.conv3d(S, mean_kern, mode='reflect') # window average salinity
+        Tn, Sn = self.TSnorm(T, S)
+        torch.stack((Tn.expand(-1,C,L,W,-1), Sn, torch.zeros_like(Sn)), dim=-1).view(N*C,L,W,D,3)
+        ts_grid = self.ts_grid_d3base.expand(-1,N*C,-1,-1,-1,-1) #2, N*C,1,tc,sc,1
+        # COMMENT - brine salinity balance is ignored : salinity transport occurs dynamically
+        if_ = 1 - F.grid_sample(ts_grid[0], ts_input).reshape(N,C,L,W,D) #N*C,1,L,W,D to N,C,L,W,D
+        S = (ox > 0); S = F.conv3d(S, mean_kern, mode='reflect') # window average brine fraction

@@ -105,8 +105,8 @@ def simulate(erc, mur=None, wavelength_m=1, cells_per_m=20, pol='H', inc=None,
     B, C, Nz, Ny, Nx = er.shape
     if (mur == None): # note : most dielectric materials have magnetic permeability near free-space value
         mur = torch.full((B, C, Nz, Ny, Nx), 1.0,  dtype=dtype, device=device)
-    if (cells_per_m * wavelength_m < 10):
-        raise ValueError("Cancelled run : sub-resolution wavelength will cause dispersion error")
+    if (cells_per_m * wavelength_m <= 2):
+        raise ValueError("Cancelled run : input below Nyquist limit of 2 cells per wavelength.")
 
     Time = int(3 * (Nx * erI + n_periods * period))
     if (dtype == torch.float16):

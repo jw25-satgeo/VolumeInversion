@@ -1,0 +1,14 @@
+Run with ISCE_processed files:
+
+--
+
+scripts_Py3/forest_stand_height 
+
+
+-- 
+
+blarg
+
+python <...>forest_stand_height.py A B C D "linkfile.txt" "flagfile.txt" "???"
+
+python <...>create_mosaic.py "ISCE"

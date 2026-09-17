@@ -2,6 +2,12 @@ import requests
 import datetime
 import pandas as pd
 
+'''
+This data access module retrieves weather forecast data from the Open-Meteo weather archive API, which uses the ERA5 model.
+Zippenfenig (2023) - doi:10.5281/zenodo.7970649
+github available @ https://github.com/open-meteo/open-meteo
+'''
+
 def get_temperatures(lat,lon,start_date,end_date,):
     """
     Parameters

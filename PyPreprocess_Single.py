@@ -114,7 +114,7 @@ class Dataset_SNAPbase(Dataset):
         except FileExistsError: print(f'{self.cache_dir} already exists - data will be overwritten.')
         graph.run()
 
-    def ncGet(self):
+    def ncGet(self, ia=True, rg=False, lat=False, lon=False):
         ncd = netCDF4.Dataset(os.path.join(self.cache_dir, self.nc_fn))
         print('extracting parameters...')
         # Metadata retrieval
@@ -164,7 +164,7 @@ class Dataset_SNAPbase(Dataset):
         slckey = [(slckey[i], slckey[i+1]) for i in np.arange(0,len(slckey),2)]
         self.nc_slckey = slckey
         self.slc = np.array([ncd.variables[el[0]][:] + ncd.variables[el[1]][:] * 1j for el in slckey])
-        print('retrieved SLC complex.')
+        print('retrieved SLC complex (B,H,W).')
 
         print('rescaling auxiliary data...')
         ia = ncd.variables['incident_angle'][:]
@@ -177,6 +177,20 @@ class Dataset_SNAPbase(Dataset):
         self.lat = rescale_tp2ref(ncd.variables['latitude'][:])
         self.lon = rescale_tp2ref(ncd.variables['longitude'][:])
         print('all parameters extracted.')
+
+    def ncWrite(self, arr, name='newBand'):
+        '''
+        NOTE - expects SLC band resolution / data size! Also enforces SLC template real-valued datatype.
+        '''
+        ncd = netCDF4.Dataset(os.path.join(self.cache_dir, self.nc_fn), 'r+')
+        if name in ncd.variables.keys():
+            ncd.variables[name][:] = arr
+        else:
+            template_band = ncd.variables[[el for el in ncd.variables.keys() if 'i_' in el or 'q_' in el][0]]
+            band = ncd.createVariable(name, template_band.datatype, template_band.dimensions)
+            band.setncatts(template_band.__dict__)
+            band[:] = arr.astype(template_band.dtype)
+        #ncd[''][:] = array
 
 metric2base = {
     'W':    ('W', 1.0),

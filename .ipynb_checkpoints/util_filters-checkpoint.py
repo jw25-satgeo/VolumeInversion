@@ -1,6 +1,22 @@
 import torch
 import torch.nn.functional as F
 
+def nanpute_n1mean(x: torch.Tensor, max_iters=None, dims=(0,1)) -> torch.Tensor:
+    '''
+    Infill NaN values by averaging immediate neighbours. 
+    '''
+    if max_iters is None: max_iters = sum([x.shape[dim] for dim in dims])
+    sl = tuple(slice(1, -1) if i in dims else slice(None) for i in range(x.ndim))
+    __x = torch.full(tuple(x.shape[i]+2 if i in dims else x.shape[i] for i in range(x.ndim)), torch.nan, device=x.device, dtype=x.dtype)
+    for _ in range(max_iters):
+        __x[sl] = x; # pad before unfold to preserve spatial dimension
+        nv, _x, _v = ~torch.isfinite(x), __x, torch.isfinite(__x)
+        if not nv.any(): break
+        for dim in dims: _x, _v = _x.unfold(dim,3,1), _v.unfold(dim,3,1) # restores padded dimension to orig
+        x[nv] = torch.where(_v[nv], _x[nv], 0).flatten(-len(dims)).sum(-1) / _v[nv].flatten(-len(dims)).sum(-1)
+    return x
+        
+
 # -- LEE FILTER (src : https://github.com/torchgeo/torchgeo/blob/e0b255d52f23e689c5d2a278776f4eb3b5498f32/torchgeo/transforms/sar.py#L97)
 
 def _box_filter(x: torch.Tensor, window_size: int) -> torch.Tensor:

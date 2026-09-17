@@ -1,0 +1,256 @@
+iterations=4
+radius=(8, 2)
+
+with torch.no_grad():
+    '''ogpf = F.pad(ogpf, (0,0,radius[0]+p_size[0]//2, radius[0]+p_size[0]//2, radius[1]+p_size[1]//2, radius[1]+p_size[1]//2))
+    ogpf = ogpf.unfold(1,p_size[0]+radius[0]*2,1).unfold(2,p_size[1]+radius[1]*2,1)[:,:-1,:-1] # 2,H,W,C,h,w
+
+    cosim = torch.empty(key.shape[1], radius[0]*2+1, radius[1]*2+1, device=device, dtype=fptype)
+    for i in range(key.shape[1]):
+        temp = ogpf[0,key[0,i],key[1,i],:,radius[0]:-radius[0],radius[1]:-radius[1]][None,None,:,:,:].flatten(-3) #1,1,C,h,w -> 1,1,D
+        temp = temp / torch.linalg.norm(temp,dim=-1)[...,None]
+        targ = ogpf.moveaxis(3,-1)[1,key[0,i],key[1,i]].unfold(0,p_size[0],1).unfold(1,p_size[1],1).flatten(-3) #ih,iw,C,h,w -> ih,iw,D
+        targ = targ / torch.linalg.norm(targ,dim=-1)[...,None]
+        cosim[i] = torch.nansum(temp*targ, dim=-1) #ih,wh
+    del(ogpf)
+
+    # confidence masking
+    tmp = cosim.sum(dim=(1,2)); tmp /= tmp.max()
+    mask = tmp > 0.25
+    cosim, key = cosim[mask], key[:,mask]
+    
+    wgt = torch.exp(alpha * (cosim - cosim.max()))[...,None] # N,ih,iw,1
+    dij = (torch.arange(-radius[0], radius[0]+1, dtype=fptype, device=device),
+           torch.arange(-radius[1], radius[1]+1, dtype=fptype, device=device))
+    dij = torch.stack(torch.meshgrid(dij[0], dij[1], indexing='ij'),dim=-1)[None,...] # 1,ih,iw,2
+    offset = (wgt * dij).nansum(dim=(1,2)) / wgt.sum(dim=(1,2)) #N,2
+    del(wgt, dij, cosim)'''
+
+    dij = (torch.arange(-radius[0], radius[0]+1, dtype=fptype, device=device),
+           torch.arange(-radius[1], radius[1]+1, dtype=fptype, device=device))
+    dij = torch.stack(torch.meshgrid(dij[0], dij[1], indexing='ij'),dim=-1)[None,...] # ih,iw,2
+    offset = torch.zeros(key.shape[1], key.shape[0], device=device, dtype=fptype)
+    pj, pk, rj, rk = p_size[0]//2, p_size[1]//2, radius[0], radius[1]
+    for coarseness in range(iterations-1, -1, -1):
+        pjb, rjb, pkb, rkb = [2**coarseness * el for el in (pj,rj,pk,rk)]
+        key_inds = torch.arange(key.shape[1], device=device, dtype=torch.long)
+        key_inds = key_inds[(torch.clamp(key[0]+offset[:,0],pjb+rjb,H-pjb-rjb-1) == key[0]+offset[:,0]) * \
+            (torch.clamp(key[1]+offset[:,1],pkb+rkb,W-pkb-rkb-1) == key[1]+offset[:,1])]
+        cosim = torch.zeros(key.shape[1], radius[0]*2+1, radius[1]*2+1, device=device, dtype=fptype)
+        for i in key_inds:
+            j, k = torch.round(key[0,i] + offset[i,0]).long(), torch.round(key[1,i] + offset[i,1]).long()
+            temp = ogpf[None, 0, j-pjb:j+pjb, k-pkb:k+pkb].permute(0,3,1,2)
+            temp = F.avg_pool2d(temp, kernel_size=2**coarseness, stride=2**coarseness)[0].permute(1,2,0).flatten(-3)
+            temp = temp / torch.linalg.norm(temp,dim=-1)[...,None]
+            targ = ogpf[None, 1, j-pjb-rjb:j+pjb+rjb, k-pkb-rkb:k+pkb+rkb].permute(0,3,1,2)
+            targ = F.avg_pool2d(targ, kernel_size=2**coarseness, stride=2**coarseness)[0].permute(1,2,0)
+            targ = targ.unfold(0,2*pj,1).unfold(1,2*pk,1).moveaxis(3,-1).flatten(-3)
+            targ = targ / torch.linalg.norm(targ,dim=-1)[...,None]
+            cosim[i, :targ.shape[0], :targ.shape[1]] = torch.nansum(temp*targ, dim=-1) #ih,wh
+    
+        wgt = torch.exp(alpha * (cosim - cosim.max()))[...,None] # N,ih,iw,1
+        offset += (wgt * dij).nansum(dim=(1,2)) / wgt.sum(dim=(1,2)) #N,2
+        #del(wgt, cosim)
+
+
+
+import PolarDecomp
+import thin_plate_spline
+importlib.reload(thin_plate_spline)
+from thin_plate_spline import ThinPlateSpline
+
+with torch.no_grad():
+    avg_window=3
+    p_size=(96,48)
+    radius=(24, 8)
+    alpha = 5
+    iterations=8
+    device='cuda'
+    dtype=torch.complex64
+
+    # ensure window fold/unfold doesn't alter image dimension
+    assert (qpol1.shape[1] % p_size[0] == 0) and (qpol1.shape[2] % p_size[1] == 0)
+    fptype = torch.empty(1,dtype=dtype).real.dtype
+    radius = torch.tensor(radius, dtype=torch.long, device=device)
+    
+    qpr = torch.as_tensor(qpol1, device=device, dtype=dtype).moveaxis(0,-1)
+    H,W,B = qpr.shape[0], qpr.shape[1], qpr.shape[2]
+    C3 = (qpr[...,:,None] * qpr[...,None,:].conj())# H,W,B,B
+    C3 = C3.permute(2,3,0,1)
+    C3 = torch.complex(
+        F.avg_pool2d(C3.real, avg_window, 1, avg_window//2),
+        F.avg_pool2d(C3.imag, avg_window, 1, avg_window//2),
+    ).permute(2,3,0,1)
+    
+    intensity = (-qpr[...,None].adjoint() @ torch.linalg.solve_ex(C3, qpr[...,None])[0]); del(C3)
+    pwf_inv = torch.abs(1 / intensity).squeeze(-1).squeeze(-1); del(intensity) # polarimetrically whitened reciprocal (see p.6 of paper)
+    pwf_inv = pwf_inv.unfold(0,p_size[0]//2,p_size[0]//2).unfold(1,p_size[1]//2,p_size[1]//2) #Hc,Wc,h,w
+    
+    _, key = torch.max(pwf_inv.reshape(pwf_inv.shape[0], pwf_inv.shape[1], -1), dim=-1, keepdim=False) # Hc,Wc
+    key = torch.stack(
+        ((key // pwf_inv.shape[-1]) + (torch.arange(key.shape[0], dtype=torch.long, device=device)[:,None] - 1) * (p_size[0]//2),
+         (key %  pwf_inv.shape[-1]) + (torch.arange(key.shape[1], dtype=torch.long, device=device)[None,:] - 1) * (p_size[1]//2)), dim=0
+    ).view(2,-1); key = key[:, (key >= radius[:,None]).all(dim=0)] - radius[:,None] # 2,N : remove keys w/o full search windows
+    print(key[0].max(), key[0].min(), key[1].max(), key[1].min())
+
+ogpf = PolarDecomp.OGPF(qpr.moveaxis(-1,0), qpol2, device=device, p_disp=False, fptype=fptype).detach() # 2,H,W,C
+
+with torch.no_grad():
+    ogpf = F.pad(ogpf, (0,0,radius[0]+p_size[0]//2, radius[0]+p_size[0]//2, radius[1]+p_size[1]//2, radius[1]+p_size[1]//2))
+    ogpf = ogpf.unfold(1,p_size[0]+radius[0]*2,1).unfold(2,p_size[1]+radius[1]*2,1)[:,:-1,:-1] # 2,H,W,C,h,w
+
+    cosim = torch.empty(key.shape[1], radius[0]*2+1, radius[1]*2+1, device=device, dtype=fptype)
+    for i in range(key.shape[1]):
+        temp = ogpf[0,key[0,i],key[1,i],:,radius[0]:-radius[0],radius[1]:-radius[1]][None,None,:,:,:].flatten(-3) #1,1,C,h,w -> 1,1,D
+        temp = temp / torch.linalg.norm(temp,dim=-1)[...,None]
+        targ = ogpf.moveaxis(3,-1)[1,key[0,i],key[1,i]].unfold(0,p_size[0],1).unfold(1,p_size[1],1).flatten(-3) #ih,iw,C,h,w -> ih,iw,D
+        targ = targ / torch.linalg.norm(targ,dim=-1)[...,None]
+        cosim[i] = torch.nansum(temp*targ, dim=-1) #ih,wh
+    del(ogpf)
+
+    # confidence masking
+    tmp = cosim.sum(dim=(1,2)); tmp /= tmp.max()
+    mask = tmp > 0.25
+    cosim, key = cosim[mask], key[:,mask]
+    
+    wgt = torch.exp(alpha * (cosim - cosim.max()))[...,None] # N,ih,iw,1
+    dij = (torch.arange(-radius[0], radius[0]+1, dtype=fptype, device=device),
+           torch.arange(-radius[1], radius[1]+1, dtype=fptype, device=device))
+    dij = torch.stack(torch.meshgrid(dij[0], dij[1], indexing='ij'),dim=-1)[None,...] # 1,ih,iw,2
+    offset = (wgt * dij).nansum(dim=(1,2)) / wgt.sum(dim=(1,2)) #N,2
+    del(wgt, dij, cosim)
+
+    tps = ThinPlateSpline(alpha=0.0, order=2, enforce_tps_kernel=False, device=device)
+    tps.fit((key.moveaxis(0,1) + offset)[:,[1,0]], key.moveaxis(0,1)[:,[1,0]])
+
+    coreg_map = torch.stack(torch.meshgrid(torch.arange(H),torch.arange(W),indexing='ij'),dim=-1).view(H*W,2).to(fptype).to(device) #N,2
+    coreg_map = tps.transform(coreg_map).detach().view(H,W,2)[None,...]
+    coreg_map[...,0] = coreg_map[...,0] / (H / 2) - 1
+    coreg_map[...,1] = coreg_map[...,1] / (W / 2) - 1
+    coreg_map = coreg_map[...,[1,0]]
+    
+    qp2_coreg = torch.complex(F.grid_sample(torch.as_tensor(qpol2.real, device=device, dtype=fptype)[None,...], coreg_map, mode='bicubic'),
+                              F.grid_sample(torch.as_tensor(qpol2.imag, device=device, dtype=fptype)[None,...], coreg_map, mode='bicubic'))[0]
+
+
+
+from CSIM import copula_sim
+def OGPF(qpol1, qpol2, channels=8, ps=None, fmp_chunk=256, g_kern_std=(1,5,5), device='cuda', tensor=True, p_disp=True):
+    '''
+    Adapted OGPF : for each patch, determine the most similar scattering metric.
+    '''
+    H, W = qpol1.shape[1], qpol1.shape[2]
+    if (ps is None): #ensures a minimum 64x64 patch size
+        ps = 2**max([i for i in range(6, min(H,W).bit_length()) if (i==6 or (H%(2**i)==0 and W%(2**i)==0))])
+        ps = [ps,ps]; print('generated patch size:',ps)
+    if (ps[0] != ps[1]): raise ValueError(f'Patch {ps} is not square.')
+    if (2**((ps[0]).bit_length()-1)!=ps[0] or 2**((ps[1]).bit_length()-1)!=ps[1]):raise ValueError(f'Patch {ps} is not 2^x.')
+    
+    FMP = torch.zeros((H,W,6,2), device=device, dtype=torch.float16)
+    for i in tqdm.trange(H//fmp_chunk + 1 if(H%fmp_chunk > 0) else H//fmp_chunk, desc='FMP decomp chunks', disable=not p_disp):
+        i1, i2 = fmp_chunk*i, fmp_chunk*(i+1)
+        FMP[i1:i2,:,:,0] = FreemanPlus(qpol1[:,i1:i2], device=device)
+        FMP[i1:i2,:,:,1] = FreemanPlus(qpol2[:,i1:i2], device=device)
+
+    #H,W,C,2 to 2,H,W,C to Hc,Wc to Hc,Wc,band
+    scores = torch.stack([copula_sim(FMP.permute(3,0,1,2)[...,i,None]) for i in range(FMP.shape[2])], dim=-1)
+    scores = torch.argmin(scores, dim=2)[None,None,...].float() #Hc,Wc,band to 1,1,Hc,Wc
+    scores = F.interpolate(scores, size=(H,W), mode='nearest').permute(2,3,0,1).expand(-1,-1,-1,2).int() #1,1,Hc,Wc to H,W,1,2
+    FMP = FMP.gather(2, scores).permute(3,2,0,1) # H,W,1,2 to 2,1,H,W (B,C,H,W) - so dim0 spans both im1 and im2
+    
+    sobel_x = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]],device=device,dtype=FMP.dtype)[None,None,...]
+    sobel_y = torch.tensor([[-1,-2,-1],[0,0,0],[1,2,1]],device=device,dtype=FMP.dtype)[None,None,...]
+    gx = F.conv2d(FMP, sobel_x, padding=1, groups=1)
+    gy = F.conv2d(FMP, sobel_y, padding=1, groups=1)
+    
+    theta = torch.linspace(0,np.pi,channels,device=device,dtype=FMP.dtype)[None,:,None,None]
+    OGPF = torch.abs(torch.cos(theta) * gx + torch.sin(theta) * gy) #2,C,H,W from 1,C,1,1 x 2,1,H,W
+
+    #Gaussian filter over channel, H, W
+    g_std = torch.tensor(g_kern_std, device=device, dtype=OGPF.dtype)
+    k = torch.ceil(6 * g_std).int() #length 6 std, or radius 3 std
+    tmp = torch.tensor(OGPF.shape[-3:], device=device).to(k.dtype)//3; k[k > tmp] = tmp[k > tmp]
+    k = torch.stack(torch.meshgrid(*[torch.arange(k[i],device=device)-k[i]//2 for i in [0,1,2]],indexing='ij'),dim=0)
+    k = torch.exp(-0.5*(k**2 / g_std[:,None,None,None]**2)) / (((8*torch.pi**3)**0.5)*torch.prod(g_std))
+    k = torch.sum(k, dim=0)[None,None,...] #1,1,z,x,y
+    #pad = (k.shape[2]//2,k.shape[2]//2, k.shape[3]//2,k.shape[3]//2, k.shape[4]//2,k.shape[4]//2)
+    pad = tuple([k.shape[i//2]//2 for i in range(6)]) #print(OGPF.shape, k.shape, pad)
+    OGPF = F.conv3d(F.pad(OGPF.unsqueeze(1), pad, mode='circular'), k) #2,1,C,H,W circular conv 1,1,x,y,z
+    OGPF = OGPF.squeeze(1)
+
+    OGPF = OGPF.permute(0,2,3,1) #2,C,H,W to 2,H,W,C
+    if (tensor): return OGPF
+    return OGPF[0].moveaxis(-1,0).detach().cpu().numpy(), OGPF[1].moveaxis(-1,0).detach.cpu().numpy()
+
+
+class Pair_Dataset_SNAPcoreg_CFOG(Pair_Dataset_SNAPbase):
+    default_label="SNAPCoreg_YamaguchiGrad"
+    # source - https://ieeexplore.ieee.org/document/10758293 "PolSAR Image Registration Using Orientated Gradients of Polarimetric Features"
+    # source - https://ieeexplore.ieee.org/document/8766118 "Fast and Robust Matching for Multimodal Remote Sensing Image Registration"
+
+    def SnapistaProc(self, s1_fn, s2_fn, nc_fn):
+        from esa_snappy import snapista as snp
+        print ('beginning ESA SNAPPY preprocessing..')
+        gf = self._get_snapista_calib_graph(s1_fn, s2_fn)
+        ori = np.linspace(0, np.pi, 9); ol = 9
+        bm_op0 = [snp.TargetBand('surf_b_sn', 'Yamaguchi_surf_b'), snp.TargetBand('surf_b_se','Yamaguchi_surf_b')]
+        bm_op1 = [snp.TargetBand(f'og_{i}',f'abs(surf_b_sn*sin({ori[i]})+surf_b_se*cos({ori[i]})') for i in range(ol)]
+        bm_op2 = [snp.TargetBand(f'cfog_{i}',f'2*og_{i}+og_{(i-1)%ol}+og_{(i+1)%ol}') for i in range(ol)]
+
+        for nd in [1,2]:
+            gf.add_node(operator = snp.Operator('Polarimetric-Decomposition', decomposition='Yamaguchi Decomposition'),
+                        node_id = f'decomp_s{nd}', source=f'calib_s{nd}')
+            gf.add_node(operator = snp.Operator('BandMaths',targetBandDescriptors=snp.TargetBandDescriptors(bm_op0)),
+                        node_id = f'og_s{nd}0', source=f'decomp_s{nd}')
+            gf.add_node(operator = snp.Operator('Image-Filter', sourceBandNames='surf_b_sn', selectedFilterName='Sobel North'),
+                        node_id = f'og_s{nd}1', source=f'og_s{nd}0')
+            gf.add_node(operator = snp.Operator('Image-Filter', sourceBandNames='surf_b_se', selectedFilterName='Sobel East'),
+                        node_id = f'og_s{nd}2', source=f'og_s{nd}1')
+            gf.add_node(operator = snp.Operator('BandMaths',targetBandDescriptors=snp.TargetBandDescriptors(bm_op1)),
+                        node_id = f'og_s{nd}3', source=f'og_s{nd}2')
+            gf.add_node(operator = snp.Operator('BandMaths',targetBandDescriptors=snp.TargetBandDescriptors(bm_op2)),
+                        node_id = f'og_s{nd}4', source=f'og_s{nd}3')
+            gf.add_node(operator = snp.Operator('BandSelect', bandNamePattern='^cfog_.+'),
+                        node_id = f'og_s{nd}5', source=f'og_s{nd}4')
+            gf.add_node(operator = snp.Operator('Image-Filter', selectedFilterName='Low-Pass 5x5'),
+                        node_id = f'og_s{nd}6', source=f'og_s{nd}5')
+            gf.add_node(operator = snp.Operator('Merge', geographicError='NaN'),
+                        node_id = f'calib_s{nd}2', source=[f'og_s{nd}6', f'calib_s{nd}'])
+        
+        oper1 = snp.Operator('CreateStack', resamplingType='NEAREST_NEIGHBOUR', initialOffsetMethod='Product Geolocation')
+        oper2 = snp.Operator('Cross-Correlation');  oper3 = snp.Operator('Warp')
+        gf.add_node(operator = oper1, node_id = 'stk_op1', source = ['calib_s12','calib_s22'])
+        gf.add_node(operator = oper2, node_id = 'stk_op2', source = 'stk_op1')
+        gf.add_node(operator = oper3, node_id = 'stk_op3', source = 'stk_op2')
+        oper1 = snp.Operator('BandSelect', bandNamePattern='^._([HVRL]{2})_.*') # follows pattern i_??_...
+        oper2 = snp.Operator('Write', file=f'{self.cache_dir}/{nc_fn}', formatName='NETCDF4-BEAM')
+        gf.add_node(operator = oper1, node_id = 'stk_op4', source = 'stk_op3')
+        gf.add_node(operator = oper2, node_id = 'stk_write', source = 'stk_op4')
+        try: os.mkdir(self.cache_dir)
+        except FileExistsError: print(f'{self.cache_dir} already exists - data will be overwritten.')
+        gf.run()
+
+
+binary_input = tmp_mask.astype(np.int32)
+import cv2
+contours, hierarchy = cv2.findContours(binary_input, cv2.RETR_FLOODFILL, cv2.CHAIN_APPROX_SIMPLE)
+
+def _DFS(polygons, contours, hierarchy, sibling_id, is_outer, siblings):
+  while sibling_id != -1:
+    contour = contours[sibling_id].squeeze(axis=1)
+    if len(contour) >= 3:
+      first_child_id = hierarchy[sibling_id][2]
+      children = [] if is_outer else None
+      _DFS(polygons, contours, hierarchy, first_child_id, not is_outer, children)
+      if is_outer:
+        polygon = shapely.geometry.Polygon(contour, holes=children)
+        polygons.append(polygon)
+      else: siblings.append(contour)
+    sibling_id = hierarchy[sibling_id][0]
+
+polygons = []
+_DFS(polygons, contours, hierarchy[0], 0, True, [])
+plt.imshow(cv2.drawContours(binary_input, contours, -1, (0,0,255), 2))
+
+#from shapely.plotting import plot_polygon
+#plot_polygon(shapely.union_all(polygons))

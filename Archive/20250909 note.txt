@@ -1,0 +1,29 @@
+Stepping of the advection-diffusion system: how to do?
+
+1. state function phase change: DONE
+ (and mostly unavoidable)
+
+2. diffusive function: ???
+| diffusion of salt
+>> salt potential
+
+| diffusion of water
+>> gravitational potential + salt potential 
+
+| diffusion of ice
+>> gravitational potential + bulk modulus + stress-strain as a representation of compression energy.entropy(?)
+
+THE HORROR OF IT ALL:
+Heavy state dependence of bulk modulus on temperature, salinity, material properties, etc - molecular-scale changes incurring complexity not factored on large scale directly
+
+.. anyway
+
+diffusion of parcels -> acceleration
+
+
+3. advection step :
+  apply velocity field using coordinate shift from scipy.ndimage to all advected properties (including mass-velocity[!])
+
+Diffusion of velocity -> doable w. viscosity term
+
+.. TODO - the velocity fields of different materia, which overlap within the grid cell, should diffuse - this is to be done via the viscosity term.

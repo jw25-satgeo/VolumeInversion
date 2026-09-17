@@ -8,6 +8,23 @@ import copernicusmarine
 
 from torch_tps import ThinPlateSpline
 
+'''
+This data access module collects data from the Arctic Ocean Sea Ice (Reanalysis) and (Analysis and Forecast) Dataset(s).
+.. DOI
+Analysis and Forecast : https://doi.org/10.48670/moi-00004
+Reanalysis            : https://doi.org/10.48670/mds-00336
+-- Reference
+Williams, T., Korosov, A., Rampal, P., and Ólason, E.: Presentation and evaluation of the Arctic sea ice forecasting system neXtSIM-F, The Cryosphere, 15, 3207–3227, https://doi.org/10.5194/tc-15-3207-2021, 2021.
+'''
+
+def scipy_interp(data, data_ll, mode='nearest', rbf_neighbors=100):
+    ll2data = None
+    match mode:
+        case 'nearest': ll2data = scipy.interpolate.NearestNDInterpolator(data_ll, data)
+        case 'linear' : ll2data = scipy.interpolate.LinearNDInterpolator(data_ll, data)
+        case 'rbf'    : ll2data = scipy.interpolate.RBFInterpolator(data_ll, data, neighbors=rbf_neighbors)
+    return ll2data
+
 def wgs84_llh2xyz(lat, lon, h=0): # h : radial height
     a, f = 6378137.0, 1.0 / 298.257223563  # ellipsoid parameters
     e2 = f*(2 - f) # eccentricity squared
@@ -43,7 +60,7 @@ class Dataset():
     Longitude   : -180 to 179.98
     '''
 
-    def __init__(self, fn_id=None, variables=['sit'], latb=(60, 90), lonb=(-180, 179.97), cache_dir=None, cred_file=None, compression='lzf', device='cpu'):
+    def __init__(self, fn_id=None, variables=['sithick'], latb=(60, 90), lonb=(-180, 179.97), cache_dir=None, cred_file=None, compression='lzf', device='cpu'):
         if cache_dir is None:
             cache_dir = "working_cache_aosi"
         if not os.path.exists(cache_dir):
@@ -67,20 +84,37 @@ class Dataset():
         self.h5_dtstring_fm = '%Y%m%dT%H%M%S%f'
         self.cp_dtstring_fm = '%Y-%m-%dT%H:%M:%S'
 
-    def read_at(self, xyz, datetimes:list, gsi=8):
+    def read_at(self, xyz, datetimes:list, mode='nearest'):
+        buffer, xyz = [], torch.as_tensor(xyz).cpu()
+        if xyz.shape[-1] == 2: # convert lat-lon to cartesian coordinates
+            xyz = torch.stack(wgs84_llh2xyz(xyz[...,0], xyz[...,1]), dim=-1)
+        if isinstance(datetimes[0], str): # check if datetime is string list
+            datetimes = [datetime.datetime.strptime(el, self.h5_dtstring_fm) for el in datetimes]
+        xyzi = self.h5f['xyz'][()]
+        for dt in datetimes:
+            dtn = dt.strftime(self.h5_dtstring_fm)
+            ddata = torch.stack([torch.as_tensor(self.h5f['scenes'][dtn][f'var_{var}'][()]) for var in self.variables], dim=-1).to(xyz.device, xyz.dtype)
+            ddata = scipy_interp(ddata.reshape(-1,len(self.variables)), xyzi.reshape(-1,3), mode=mode)
+            buffer.append(torch.as_tensor(ddata(xyz)).reshape(xyz.shape[0],xyz.shape[1],-1).permute(2,0,1))
+        return torch.stack(buffer, dim=0)
+        
+    def read_at_torched(self, xyz, datetimes:list, gsi=8, mode='nearest'):
         '''
-        xyz : (H,W,3) geolocation grid
+        xyz : (H,W,3) geolocation grid .. ALT : input (H,W,2(lat,lon)) geolocation grid
         '''
         buffer, xyz = [], torch.as_tensor(xyz, device=self.device)
+        if xyz.shape[-1] == 2: # convert lat-lon to cartesian coordinates
+            xyz = torch.stack(wgs84_llh2xyz(xyz[...,0], xyz[...,1]), dim=-1)
         if isinstance(datetimes[0], str): # check if datetime is string list
             datetimes = [datetime.datetime.strptime(el, self.h5_dtstring_fm) for el in datetimes]
         
         # generate spline for conversion of xyz to dataset pixel coordinates
         xyzi = torch.as_tensor(self.h5f['xyz'][()], device=self.device).to(xyz.dtype)
         igrid = torch.as_tensor(np.mgrid[:xyzi.shape[0],:xyzi.shape[1]], device=self.device, dtype=xyzi.dtype).view(2,-1).T
-        tps = ThinPlateSpline(device=self.device); tps.fit(xyzi.reshape(-1,3), igrid); del(xyzi, igrid)
+        #tps = ThinPlateSpline(device=self.device, order=order); tps.fit(xyzi.reshape(-1,3), igrid); del(xyzi, igrid)
+        tps = scipy_interp(igrid.cpu(), xyzi.reshape(-1,3).cpu(), mode=mode); del(xyzi, igrid)
 
-        # populate dense target grid for sampling op (note : thinplatespline has high memory overhead)
+        # populate dense target grid for sampling op (note : interpolation has high memory overhead)
         grid = torch.empty((xyz.shape[0], xyz.shape[1], 2), device=self.device, dtype=xyz.dtype)
         di, dj = max(1, xyz.shape[0]//gsi), max(1, xyz.shape[1]//gsi)
         for bi in range(0, xyz.shape[0]+gsi, di):
@@ -88,8 +122,14 @@ class Dataset():
             for bj in range(0, xyz.shape[1]+gsi, dj):
                 if bj >= xyz.shape[1] : continue
                 xyz_v = xyz[bi:bi+di, bj:bj+dj]   #  write xyz2pix retrieval result to destination array
-                grid[bi:bi+di, bj:bj+dj] = tps.transform(xyz_v.reshape(-1,3)).reshape(xyz_v.shape[0], xyz_v.shape[1], 2)
+                #grid[bi:bi+di, bj:bj+dj] = tps.transform(xyz_v.reshape(-1,3)).reshape(xyz_v.shape[0], xyz_v.shape[1], 2)
+                grid[bi:bi+di, bj:bj+dj] = torch.as_tensor(tps(xyz_v.reshape(-1,3).cpu()), device=grid.device).reshape(xyz_v.shape[0], xyz_v.shape[1], 2)
         # get data
+        match mode:
+            case 'nearest': gs_mode = 'nearest'
+            case 'linear': gs_mode='bilinear'
+            case 'rbf': gs_mode='bilinear'
+            case None: raise ValueError('invalid mode: must be in [nearest, linear, rbf]')
         for dt in datetimes:
             dtn = dt.strftime(self.h5_dtstring_fm)
             data = torch.stack([torch.as_tensor(self.h5f['scenes'][dtn][f'var_{var}'][()]) for var in self.variables], dim=0).to(self.device,xyz.dtype)
@@ -98,12 +138,15 @@ class Dataset():
         # ..
         return torch.stack(buffer, dim=0)
 
-    def download_data(self, datetimes:list, delta=datetime.timedelta(hours=0.5)):
+    def download_data(self, datetimes:list, delta=datetime.timedelta(hours=0.5), overwrite=False):
         if isinstance(datetimes[0], str): # check if datetime is string list
             datetimes = [datetime.datetime.strptime(el, self.h5_dtstring_fm) for el in datetimes]
         
         no_xyz_flag = True
         for dt in datetimes:
+            dtn = dt.strftime(self.h5_dtstring_fm)
+            if not overwrite and f'scenes/{dtn}' in self.h5f :
+                continue
             dt1, dt2 = dt - delta, dt + delta
             dt1n, dt2n = dt1.strftime(self.cp_dtstring_fm), dt2.strftime(self.cp_dtstring_fm)
             if dt1 < datetime.datetime(year=2019, month=8, day=1):
@@ -133,8 +176,7 @@ class Dataset():
                 lat, lon = np.meshgrid(lat, lon, indexing='ij')
             xyz = np.stack(wgs84_llh2xyz(lat, lon), axis=-1); del(lat, lon)
             
-            dtn = dt.strftime(self.h5_dtstring_fm)
-            if f'scenes/{dtn}' in self.h5f : del(self.h5f[f'scenes/{dtn}'])
+            if overwrite and f'scenes/{dtn}' in self.h5f : del(self.h5f[f'scenes/{dtn}'])
             scene_ = self.h5f.create_group(f'scenes/{dtn}', track_order=True)
             #scene_['_datetime'] = write actual datetime of received scene for bookkeeping purposes
             if no_xyz_flag:

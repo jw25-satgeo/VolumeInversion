@@ -97,30 +97,32 @@ class SimpleReflector():
         refl = torch.complex(refl[...,0],refl[...,1])
         return refl
         
-    def gen_refl_sample(self, n_periods=4, ia_b=(0,55)):
+    def gen_refl_sample(self, n_periods=4, ia_b=(0,55), verbose=True):
         '''
         er (B,C,Nx,Ny,Nz) -> refl (B,C,pol,ia)
         '''
         B,C,Nx,Ny,Nz = self.er.shape
         dtype_c = (torch.ones((1), dtype=self.dtype) + 1j).dtype
-        result = torch.zeros((B,C,4,len(self.ia_input)), device=self.device, dtype=dtype_c)
+        tmp = np.rad2deg(self.ia_input[:,0]); tmp = (tmp >= ia_b[0]) & (tmp < ia_b[1])
+        ia_input = self.ia_input[tmp]
+        result = torch.zeros((B,C,4,len(ia_input)), device=self.device, dtype=dtype_c)
         batch_iters = math.ceil(self.er.shape[0] / self.batch_size)
-        for i in range(len(self.ia_input)):
-            if (np.rad2deg(self.ia_input[i,0]) > ia_b[1] or np.rad2deg(self.ia_input[i,0]) < ia_b[0]): continue
-            print (f'processing incidence angle {np.rad2deg(self.ia_input[i])}, stage {i+1} of {len(self.ia_input)}')
-            print('simulating H-transmit..')
+        for i in range(len(ia_input)):
+            if verbose : print (f'processing incidence angle {np.rad2deg(ia_input[i])}, stage {i+1} of {len(ia_input)}')
+            ia_i = torch.as_tensor(ia_input[i]).to(self.device,self.dtype)[None,None,:]
+            if verbose : print('simulating H-transmit..')
             for j in range(batch_iters):
-                j0, j1 = j*self.batch_size, (j+1)*self.batch_size
-                ia_i = torch.as_tensor(self.ia_input[i]).to(self.device,self.dtype)[None,None,:].expand(j1-j0, C, -1)
+                j0, j1 = j*self.batch_size, min(B, (j+1)*self.batch_size)
+                ia_ij = ia_i.expand(j1-j0, C, -1)
                 read, driver, kI = LBM4S.simulate( # output hv, hh
-                    self.er[j0:j1], pol='H', wavelength_m=self.wavelength_m, cells_per_m=self.cells_per_m, n_periods=n_periods, inc=ia_i)
+                    self.er[j0:j1], pol='H', wavelength_m=self.wavelength_m, cells_per_m=self.cells_per_m, n_periods=n_periods, inc=ia_ij, verbose=verbose)
                 result[j0:j1,...,(1,0),i] = LBM4S.get_scat_coeff(read, driver, kI, single_pixel=True, ignore_H=True); del(read, driver)
-            print('simulating V-transmit..')
+            if verbose : print('simulating V-transmit..')
             for j in range(batch_iters):
-                j0, j1 = j*self.batch_size, (j+1)*self.batch_size
-                ia_i = torch.as_tensor(self.ia_input[i]).to(self.device,self.dtype)[None,None,:].expand(j1-j0, C, -1)
+                j0, j1 = j*self.batch_size, min(B, (j+1)*self.batch_size)
+                ia_ij = ia_i.expand(j1-j0, C, -1)
                 read, driver, kI = LBM4S.simulate( # output vv, vh
-                    self.er[j0:j1], pol='V', wavelength_m=self.wavelength_m, cells_per_m=self.cells_per_m, n_periods=n_periods, inc=ia_i)
+                    self.er[j0:j1], pol='V', wavelength_m=self.wavelength_m, cells_per_m=self.cells_per_m, n_periods=n_periods, inc=ia_ij, verbose=verbose)
                 result[j0:j1,...,(3,2),i] = LBM4S.get_scat_coeff(read, driver, kI, single_pixel=True, ignore_H=True); del(read, driver)
 
         self.refl = result #B,C,4,i
