@@ -30,7 +30,7 @@ class Dataset():
     def add(self, **ix):
         # note : dataset size incrementation works for arbitrarily large batches.
         if not ix: return
-        if mode != 'a': raise ValueError('mode must be "a" for collector increment')
+        if self.mode != 'a': raise ValueError('mode must be "a" for collector increment')
         shapes = [x.shape[0] for key, x in ix.items()]
         if len(set(shapes)) > 1: raise ValueError('unequal batch size: cannot write to collector.')
         di, B = self.h5f.attrs['w_ind'], shapes[0]
