@@ -96,6 +96,13 @@ class LatticeSolver(torch.nn.Module):
                      (1,1,1,1,0,0), mode='constant', value=-997)
         return grid
 
+    def get_icefrac(self, T, S):
+        Tn, Sn = self.TSnorm(T,S)
+        ts_sample = torch.stack((Sn[:,:,None], Tn[:,:,None]), dim=-1) #N,D,1,2  note : grid_sample coordinates are xyz ordered, reverse of ijk
+        ts_output = F.grid_sample(self.ts_grid[None,...].repeat(T.shape[0],1,1,1), ts_sample, padding_mode='border', align_corners=False)
+        if_, bs_ = ts_output[:,0,:,0], ts_output[:,1,:,0]
+        return if_
+        
     def get_dielectric(self, x, T, wavelength):
         '''
         x: (N,C,L+2,W+2,D+2)

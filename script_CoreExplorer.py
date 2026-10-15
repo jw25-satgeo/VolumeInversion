@@ -54,7 +54,7 @@ def analyze_image(cache_dir, model, vlens, floqs, slc_ds=None, rmask_fn='mask_bi
             STr = model.unwhitener(corevec)[:,0,:vends[2]]
             S, T, rho = STr[:,:vends[0]], STr[:,vends[0]:vends[1]], STr[:,vends[1]:vends[2]]
             core = icesim.get_icefrac(T, S).reshape(h,w,-1)
-            ccore = core * ((core < 0.1).cumsum(dim=-1) == 0) # zero all entries after first 90% melt layer in depth dim
+            ccore = core * ((core < 0.3).cumsum(dim=-1) == 0) # zero all entries after first 90% melt layer in depth dim
             ccore[rho.reshape(h,w,-1) < 0.25] = 0 # density below 0.25 g/cm3 is free space, do not count towards thickness
             metric[i:i+h, j:j+w] = (ccore > 0).sum(-1) # get thickness as all remaining bins
         metric /= 30;
@@ -126,7 +126,7 @@ def slc2core(slc, inc, struct_vlen, whitener, sim_inc=[21.5, 27.3, 33.3, 39.9, 4
     C4 = C4.reshape(H*W, 1, B*B).expand(-1, I, -1).reshape(H*W,I*B*B)
     core_vec = torch.zeros((H*W, 1, struct_vlen + 2*I*B*B), device=slc.device, dtype=inc.dtype)    
     core_vec[:, 0, -2*I*B*B:-I*B*B] = C4.real ; core_vec[:, 0, -I*B*B:] = C4.imag
-    core_vec = whitener(core_vec)# / 1000 # move to diffusion state space
+    core_vec = whitener(core_vec)
     # .. build conditional mask from gaussian splat
     cond_mask = torch.zeros_like(core_vec)
     cond_mask[:, 0, -2*I*B*B:] = inc_p[:,:,None,...].expand(-1,-1,2,-1,B,B).reshape(H*W,2*I*B*B)
@@ -143,11 +143,13 @@ def _get_ltsolvr():
     icesim.save()
     return icesim
 
-def generate_(cores, fn='em_funcgen.hdf5', batch_n=12, bins=None, hshape=(50,20), wavelength_m=0.236, cells_per_m=20, ia_b=(20,60), device='cuda', verbose=False, collector=None, attrs={}):
+def generate_(cores, fn='em_funcgen.hdf5', batch_n=12, bins=None, hshape=(50,20), wavelength_m=0.236, cells_per_m=20, ia_b=(20,60), device='cuda', verbose=False, collector=None, attrs={}, c_iter_offset=0, resume_last=True):
     (T_, S_, rho_), icesim = cores, _get_ltsolvr()
     if collector is None : collector = util_collector.Dataset(fn)
-    batches = ((T_[i:i+batch_n], S_[i:i+batch_n], rho_[i:i+batch_n]) for i in range(0, T_.shape[0], batch_n))
-    for i, (T, S, rho) in enumerate(tqdm(batches)):
+    start = max(collector.h5f.attrs['w_ind'] - c_iter_offset, 0) if resume_last else 0
+    if start >= T_.shape[0]: return collector # early return; no simulations required
+    for i in range(start, T_.shape[0], batch_n):
+        T, S, rho = T_[i:i+batch_n], S_[i:i+batch_n], rho_[i:i+batch_n]
         lattice = icesim.gen_lattice(T, S, rho, hshape=hshape)
         er = icesim.get_dielectric(lattice, T, wavelength_m)
         sref = crefl2slc.SimpleReflector(er, T, cells_per_m=cells_per_m,wavelength_m=wavelength_m, batch_size=4)
@@ -155,7 +157,7 @@ def generate_(cores, fn='em_funcgen.hdf5', batch_n=12, bins=None, hshape=(50,20)
         if i == 0: print('floquet incidence modes:', floq)
         sref.gen_refl_sample(ia_b=ia_b, verbose=verbose)
         collector.add(T=T, S=S, rho=rho, rf=sref.refl)
-    collector.set_attrs(dbins=bins or T.shape[-1], hshape=hshape, wavelength_m=wavelength_m, cells_per_m=cells_per_m, ia_b=ia_b, floq=floq, **attrs)
+    collector.set_attrs(dbins=bins or T_.shape[-1], hshape=hshape, wavelength_m=wavelength_m, cells_per_m=cells_per_m, ia_b=ia_b, floq=floq, **attrs)
     return collector
 
 def generate_randoms(iters, fn='em_randoms.hdf5', batch_n=12, bins=100, hshape=(50,20), wavelength_m=0.236, cells_per_m=20, ia_b=(20,60), device='cuda'):
@@ -163,20 +165,21 @@ def generate_randoms(iters, fn='em_randoms.hdf5', batch_n=12, bins=100, hshape=(
     for i in range(iters):
         batches = gen_rand_cores(batch_n, bins=bins, device=device) # could be simplified
         collector = generate_(batches, fn=fn, bins=bins, hshape=hshape, wavelength_m=wavelength_m,
-                              cells_per_m=cells_per_m, ia_b=ia_b, device=device, collector=collector)
+                              cells_per_m=cells_per_m, ia_b=ia_b, device=device, collector=collector, c_iter_offset=(i * batch_n))
     return collector
     
 def generate_resice(fn='em_resice.hdf5', iters=1, bins=100, hshape=(50,20), wavelength_m=0.236, cells_per_m=20, ia_b=(20,60), lattice_freeboard_m=0.25, min_samples=3, get_oversize=False, parts=['A'], augment_function=None, device='cuda'):
-    collector, column_thick = None, bins/cells_per_m
+    collector, column_thick, c_iter_offset = None, bins/cells_per_m, 0
     for i in range(iters):
-        for part in parts:   # T, S, rho
+        for j, part in enumerate(parts):   # T, S, rho
             T, S, rho = data_resice.get_scaled_cores( f'RESICE/RESICE_Part{part}.csv', bins=bins, max_depth=column_thick - lattice_freeboard_m,
                                                       max_height=lattice_freeboard_m, min_samples=min_samples, get_oversize=get_oversize, device=device )
             if rho.shape[-1] == 1: rho = rho.expand(-1, T.shape[-1]);
             if augment_function is not None: T, S, rho = augment_function(T, S, rho)
             print(f'simulating {T.shape[0]} RESICE retrievals')
             collector = generate_((T,S,rho), fn=fn, bins=bins, hshape=hshape, wavelength_m=wavelength_m, cells_per_m=cells_per_m, ia_b=ia_b,
-                                  device=device, verbose=True, collector=collector, attrs={'get_oversize': get_oversize})
+                                  device=device, verbose=True, collector=collector, attrs={'get_oversize': get_oversize}, c_iter_offset=c_iter_offset)
+            c_iter_offset += T.shape[0]
     return collector
     
 # --- UTIL_COLLECTOR based 

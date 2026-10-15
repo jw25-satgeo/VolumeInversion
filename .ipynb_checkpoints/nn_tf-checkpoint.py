@@ -31,6 +31,27 @@ import nn_util
 
 # Understanding Why Adam Outperforms SGD: Gradient Heterogeneity in Transformers @ https://arxiv.org/html/2502.00213v2
 
+#  ----------------------------------------------------------------------------------
+
+
+#  Diffusion model denoising sampling wrapper (Conditional Stochastic Differential Equation)
+# .. Mean Velocity Matching: Rethinking Generative Dynamics in Diffusion Models (Zhang et al. 2026) @ https://arxiv.org/html/2609.25444v1
+class CSDE(nn.Module): # conditional stochastic SDE sampler
+    def __init__(self, net, eta=0, dt=1):
+        super().__init__()
+        self.net = net
+        self.eta = eta
+        self.dt = dt
+    def forward(self, x, x_c=None, cond_mask=None):
+        x1 = x + self.net(x) * self.dt
+        if self.eta > 0: x1 += self.eta * torch.randn_like(x)
+        if cond_mask is not None:
+            if cond_mask.dtype is torch.bool: x1[cond_mask] = x[cond_mask]
+            elif cond_mask.dtype.is_floating_point: x1 = cond_mask*x + (1 - cond_mask)*x1
+        return x1
+
+#  ----------------------------------------------------------------------------------
+
 # Attention-Only Transformers via Unrolled Subspace Denoising (Wang et al. 2025) @ https://arxiv.org/abs/2506.03790v1
 # + : Are Transformers with One Layer Self-Attention Using Low-Rank Weight Matrices Universal Approximators? @ https://arxiv.org/abs/2307.14023
 # + :  A Simplified Query-Only Attention for Encoder-Based Transformer Models (Yeom & An, 2024) @ https://www.mdpi.com/2076-3417/14/19/8646
@@ -57,7 +78,7 @@ class r2PA_block(nn.Module):
     '''
     Train with AdamW! SGD really doesn't seem to like this one.
     '''
-    def __init__(self, h=4, dim=16, hdim=4, channels=1, activation='sigmoid', bias=True):
+    def __init__(self, h=4, dim=16, hdim=4, channels=1, activation='sigmoid', bias=True, residual=True):
         super().__init__()
         self.h = h
         self.hd = hdim
@@ -65,57 +86,38 @@ class r2PA_block(nn.Module):
         self.P_q = nn.Linear(dim*channels, h*hdim*channels, bias=bias) # query diverging projection
         self.P_o = nn.Linear(h*hdim*channels, dim*channels, bias=bias) # merging dense projection
         self.beta = nn.Parameter(torch.ones((1,h,1,1), requires_grad=True))
+        self.residual = residual
         
     def forward(self, x):
         B,C,N = x.shape
-        X0 = F.layer_norm(x, (C,N))
-        X1 = self.P_q(X0.view(B,-1)).reshape(B,self.h,C,self.hd) # project query & split heads
-        X1 = self.act(self.beta * X1 @ X1.transpose(-1,-2)) @ X1
-        X1 = self.P_o(X1.view(B,-1)).view(B,C,N)
-        return x + X1
-
-class r2PA_Transformer(nn.Module):
-    def __init__(self, h=4, c=1, dim=16, hdim=4, activation='sigmoid', layers=6):
-        super().__init__()
-        #self.net = nn.ModuleList([r1PA_block(h,dim,c,activation) for _ in range(layers)])
-        self.net = nn.Sequential(*[r2PA_block(h,dim,hdim,c,activation) for _ in range(layers)])
-    def forward(self, x):
-        return self.net(x)
-
-class r2PA_block_CSDE(r2PA_block):
-    # Reverse-time conditional SDE block in residual two-projection form
-    def __init__(self, h=4, dim=16, hdim=4, channels=1, activation='sigmoid', bias=True, sigma=0):
-        super().__init__(h,dim,hdim,channels,activation,bias)
-        self.sigma = sigma
-    def forward(self, x, x_c=None, cond_mask=None):
-        B,C,N = x.shape
-        z = self.P_q(F.layer_norm(x, (C,N)).view(B,-1)).reshape(B,self.h,C,self.hd)
+        z = self.P_q(F.layer_norm(x, (C,N)).view(B,-1)).reshape(B,self.h,C,self.hd) # project query & split heads
         z = self.act(self.beta * z @ z.transpose(-1,-2)) @ z
         z = self.P_o(z.view(B,-1)).view(B,C,N)
-        X2 = (x + z) + self.sigma*torch.randn_like(x)
-        if cond_mask is not None:
-            if cond_mask.dtype is torch.bool:
-                X2[cond_mask] = x[cond_mask]
-            elif cond_mask.dtype.is_floating_point:
-                X2 = cond_mask*x + (1 - cond_mask)*X2
-        return X2
+        if self.residual: return x + z
+        return z
 
-class r2PA_CSDE_Transformer(nn.Module):
-    def __init__(self, h=4, c=1, dim=16, hdim=4, activation='sigmoid', sigmas=None):
+class r2PA_Transformer(nn.Module):
+    def __init__(self, h=4, c=1, dim=16, hdim=4, activation='sigmoid', layers=6, is_residual=True):
         super().__init__()
-        self.net = nn.ModuleList([r2PA_block_CSDE(h,dim,hdim,c,activation,sigma=sigma) for sigma in sigmas])
-    def forward(self, x, cond_mask=None):
-        x0 = x.clone()
-        for i in range(len(self.net)):
-            x = self.net[i](x, x0, cond_mask)
-        return x
-
-class r2PA_Transformer_Recurrent(nn.Module):
-    def __init__(self, h=4, c=1, dim=16, hdim=4, activation='sigmoid', layers=6, iters=10):
-        super().__init__()        # ref layer multiple times
-        self.net = nn.Sequential(*sum([[r2PA_block(h,dim,hdim,c,activation)] * iters for _ in range(layers)], []))
+        self.net = nn.Sequential(*[r2PA_block(h,dim,hdim,c,activation,is_residual) for _ in range(layers)])
     def forward(self, x):
         return self.net(x)
+
+class CSDE_r2PA_Transformer(nn.Module):
+    def __init__(self,h,c,dim,hdim,d=32,activation='sigmoid',eta=0,n=32):
+        super().__init__()
+        self.net = CSDE(nn.Sequential(*[r2PA_block(h,dim,hdim,c,activation,residual=False) for i in range(d)]), eta, 1/n)
+        self.n = n
+    def forward(self, x, cond_mask=None):
+        x0 = x.clone()
+        for i in range(self.n):
+            x = self.net(x, x0, cond_mask)
+        return x
+
+
+#
+#   LATENT SPACE SDE TRANSFORMER ?
+#
 
 
 class VAE_reparam(nn.Module):

@@ -16,10 +16,11 @@ This data access module retrieves sea ice property data from a variety of source
 def get(name, YYYYMMDD, lat, lon, variable='sit', mode='nearest', hemisphere='NH'):
     match name:
         case 'AMSR_KH': return AMSR_KimuraN_HasumiH(YYYYMMDD, lat, lon, mode)
-        case 'AMSR'   : return AMSR_NSDIC(YYYYMMDD, lat, lon, variable, nearest, hemisphere)
+        case 'AMSR'   : return AMSR_NSDIC(YYYYMMDD, lat, lon, variable, mode, hemisphere)
         case 'SMOS'   : return UBremen_SMOS(YYYYMMDD, lat, lon, mode)
         case 'neXtSIM': return AOSI(YYYYMMDD, lat, lon, mode)
         case 'IC1'    : return ICESat_Gridded(YYYYMMDD, lat, lon, variable, mode)
+        case 'CS2'    : return CryoSat2_Data(YYYYMMDD, lat, lon, variable, mode)
     print('data retrieved.')
 
 TITLES = {
@@ -27,7 +28,8 @@ TITLES = {
     'AMSR'     : 'AMSR-E/AMSR2 Unified L3 Daily 12.5 km gridded',
     'SMOS'     : 'Combined SMAP/SMOS Thin Sea Ice 12.5 x 12.5 km gridded',
     'neXtSIM'  : 'neXtSIM-F 3 x 3 km gridded',
-    'IC1'      : 'ICESat/GLAS L3A Seasonal 25 x 25 km gridded'
+    'IC1'      : 'ICESat/GLAS L3A Seasonal 25 x 25 km gridded',
+    'CS2'      : 'CryoSat-2 25 x 25 km gridded'
 }
 
 def scipy_interp(data, data_ll, mode='nearest', rbf_neighbors=100):

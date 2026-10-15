@@ -4,6 +4,47 @@ from torch.nn import functional as F
 from torchvision import transforms
 import numpy as np
 import math
+import matplotlib.transforms as mtransforms
+
+
+# matplotlib display
+
+class RadialLogTransform(mtransforms.Transform):
+    input_dims = output_dims = 2
+    is_separable = False
+
+    def __init__(self, scale=1.0, eps=1e-8):
+        super().__init__()
+        self.scale = scale
+        self.eps = eps
+
+    def transform_non_affine(self, xy):
+        r = np.linalg.norm(xy, axis=-1, keepdims=True)
+        r_new = np.log1p(self.scale * r) / np.log1p(self.scale) # signed/log-like radial scaling
+        return xy * r_new / np.maximum(r, self.eps)
+
+    def inverted(self):
+        return InvertedRadialLogTransform(self.scale, self.eps)
+
+
+class InvertedRadialLogTransform(mtransforms.Transform):
+    input_dims = output_dims = 2
+    is_separable = False
+
+    def __init__(self, scale=1.0, eps=1e-8):
+        super().__init__()
+        self.scale = scale
+        self.eps = eps
+
+    def transform_non_affine(self, xy):
+        r = np.linalg.norm(xy, axis=-1, keepdims=True)
+        r_new = np.expm1(r * np.log1p(self.scale)) / self.scale
+        return xy * r_new / np.maximum(r, self.eps)
+
+    def inverted(self): return RadialLogTransform(self.scale, self.eps)
+
+
+
 
 def copula_sim(x, patch_size=64, eps=1e-6):
     """

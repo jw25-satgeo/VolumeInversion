@@ -27,30 +27,31 @@ def EqualDensity_Noising_Sigmas(N, sigma0=1e-3, sigma1=10, p_mean=-1.2, p_std=1.
     sigmas = torch.exp(p_mean + p_std * norm.icdf(p)).flip(dims=[0])
     if (ascending): sigmas = sigmas.flip(dims=[0])
     return sigmas
-class ScoreMatchingWrapper(nn.Module):
+class DiffusionBlocksWrapper(nn.Module):
     '''
     A simple score matching wrapper for ResNet architectures interpreted as denoising diffusion models.
     '''
-    def __init__(self, resnet, lossfunc, sigmas, whitener=None):
+    def __init__(self, resnet, lossfunc, sigmas):
         super().__init__()
         self.resnet = resnet
         self.lossfunc = lossfunc
         self.sigma = sigmas
         # convenience references
-        self.whitener = whitener
+        self.whitener = nn.Identity()
+        self.unwhitener = nn.Identity()
     
-    def train(self, x, y=None, iters=1):
+    def train(self, x, y=None):
         loss = torch.zeros(1, device=x.device, dtype=x.dtype)
         if y is None: y = x
         for i in range(len(self.resnet.net)):
             # single block operates within prescribed noise range (DiffusionBlocks)
-            x1 = x + self.sigma[i+1] * torch.randn_like(x)
-            x2 = y + self.sigma[ i ] * torch.randn_like(x)
-            for j in range(iters):
-                x1 = self.resnet.net[i](x1)
+            noise = torch.randn_like(x)
+            x1 = x + self.sigma[i  ] * noise  # high noise
+            x2 = y + self.sigma[i+1] * noise  # low  noise
+            x1 = self.resnet.net[i](x1)
             # score matching uses sigma scaled loss (jmtomczak's tutorial)
             loss1 = self.lossfunc(x1, x2)
-            # identity constraint / zero-score case for target score matching
+            # identity constraint / zero-score case for target centred score matching
             loss2 = self.lossfunc(self.resnet.net[i](x), y)
             # backprop
             lossi = (loss1 + loss2) / (2 * self.sigma[i])**2
@@ -58,53 +59,111 @@ class ScoreMatchingWrapper(nn.Module):
             loss += lossi.detach()
         return loss
 
-    def forward(self, x, iters=1): # Langevin sampling
-        N = len(self.resnet.net)
-        for i in range(N):
-            eta = self.sigma[i+1] - self.sigma[i]
-            for j in range(iters):
-                x = self.resnet.net[i](x) + eta * torch.randn_like(x)
+# Improved Techniques for Training Score-Based Generative Models (Song & Ermon 2020) @ https://proceedings.neurips.cc/paper_files/paper/2020/file/92c3b916311a5517d9290576e3ea37ad-Paper.pdf
+# GUD: Generation with Unified Diffusion (Gerdes & Welling, 2024) @ https://arxiv.org/html/2410.02667v1
+def _bnoise(x, p): return torch.bernoulli(torch.ones_like(x)*p)
+class DiffusionBlocksWrapper_Conditional(DiffusionBlocksWrapper):
+    ''' '''
+    def train(self, x, mask, do_backprop=True):
+        loss = torch.zeros(1, device=x.device, dtype=x.dtype)
+        b_prob = (self.sigma / self.sigma.amax(dim=0)) # from sigma->0 noise to 1->0 dropout
+        bnoise = (1, _bnoise(x, b_prob[0]))
+        for i in range(len(self.resnet.net)):
+            gnoise = torch.randn_like(x)
+            bnoise = ( bnoise[1], bnoise[1] * _bnoise(x, b_prob[i+1]/b_prob[i]) ) # gradual corruption
+            x1 = ( x + mask*gnoise*self.sigma[i  ]*(1-bnoise[0]) ) * (~mask)*bnoise[0]
+            x2 = ( x + mask*gnoise*self.sigma[i+1]*(1-bnoise[1]) ) * (~mask)*bnoise[1]
+            x2i, lossi = self.resnet.net[i](x1, ~mask), 0
+            lossi = lossi + self.lossfunc(x2i, x) / (2 * self.sigma[i]**2) # SM loss
+            lossi = lossi + 0.25 * self.lossfunc(x2i, x2) / (2 * self.sigma[i]**2) # consistency loss
+            lossi = lossi + 0.25 * self.lossfunc(self.resnet.net[i](x, ~mask), x ) / (2 * self.sigma[i]**2) # identity loss
+            lossi = lossi + 0.25 * self.lossfunc(x2i, self.resnet.net[i](x2i, ~mask)) / self.sigma[i] # idempotence loss
+            if do_backprop: lossi.backward()
+            loss += lossi
+        return loss / len(self.resnet.net)
+
+# Mean Velocity Matching: Rethinking Generative Dynamics in Diffusion Models (Zhang et al. 2026) @ https://arxiv.org/html/2609.25444v1
+class VMSampler_Cond(nn.Module):
+    def __init__(self, wrapper):
+        super().__init__()
+        self.net = wrapper.net
+        self.schedf = wrapper.schedf
+        self.T = wrapper.T
+        self.n = wrapper.n
+
+    def forward(self, x, cond_mask=None):
+        sched = torch.cat((torch.zeros(1), torch.linspace(0,1,self.n)))
+        sched = self.schedf(sched.to(x.device,x.dtype), invert=True).detach()
+        sched = (sched[1:] - sched[:-1])[:,None,None,:]
+        for dt in sched.flip(0):
+            x = self.step(x, dt, cond_mask)
         return x
+    
+    def step(self, x, dt, cond_mask=None):
+        eta = dt**0.5 * (1 / self.T)**0.5
+        x1 = x + self.net(x) * dt + eta * torch.randn_like(x)
+        if cond_mask is not None:
+            if cond_mask.dtype is torch.bool: x1[cond_mask] = x[cond_mask]
+            elif cond_mask.dtype.is_floating_point: x1 = cond_mask*x + (1 - cond_mask)*x1
+        return x1
 
-def _bnoise(x, p):
-    return torch.bernoulli(torch.full_like(x, p))
-class ScoreMatchingWrapper_Conditional_Bernoulli(ScoreMatchingWrapper):
-    def train(self, x, mask, do_backprop=True):
-        loss = torch.zeros(1, device=x.device, dtype=x.dtype)
-        b_prob = self.sigma / (self.sigma.min() + self.sigma.max())
+from timewarp import Timewarp_Logistic
+class VMWrapper(nn.Module):
+    def __init__(self, net, n_features, n=32, T=10.0):
+        super().__init__()
+        self.net = net    # velocity network
+        self.T = T
+        self.n = n # number of timesteps
+        self.schedf = Timewarp_Logistic(n_features, torch.zeros(1), torch.full((1,),T))
+
+    def get_sampler(self):
+        return VMSampler_Cond(self)
+        
+    def train(self, x, do_backprop=True):
+        loss, T = torch.empty(self.n, x.shape[-1]).to(x.device, x.dtype), self.T
+        self.sched = torch.linspace(0,1,self.n).to(x.device, x.dtype)
+        self.sched = self.schedf(self.sched, invert=True)
+        xv = x.var(dim=0) + 1e-5
+        for i in range(self.n):
+            t, gnoise = self.sched[i][None,None,:].detach(), torch.randn_like(x)
+            x1 = x * (1 - t/T) + gnoise * (t / T)**0.5
+            v = self.net(x1)
+            # reparameterized regression loss
+            u_r = (t**0.5 / T) * x - gnoise / T**0.5
+            u_i = (t**0.5    ) * v
+            lossi = ( (u_r - u_i).pow(2).mean(dim=0) / xv ).flatten() # velocity matching loss
+            loss[i] = lossi.detach()
+            if do_backprop: lossi.mean().backward() # block-wise only backpropagation
+        if do_backprop: self.schedf.loss_fn(self.sched, loss).mean().backward()
+        return loss.mean()
+        
+
+class VelMatchWrapper_Cond_DiffusionBlocks(nn.Module):
+    def __init__(self, resnet, T=10):
+        raise ValueError('This module may not be functional! Reformulation may be necessary.')
+        super().__init__()
+        self.resnet = resnet
+        self.T = T        # for forward drift
         for i in range(len(self.resnet.net)):
-            x1 = ( x + mask*self.sigma[i+1]*_bnoise(x,b_prob[i  ])*torch.randn_like(x) ) * (1 - mask*_bnoise(x,b_prob[i  ]))
-            x2 = ( x + mask*self.sigma[i  ]*_bnoise(x,b_prob[i+1])*torch.randn_like(x) ) * (1 - mask*_bnoise(x,b_prob[i+1]))
-            x2i = self.resnet.net[i](x1)
-            loss1 = self.lossfunc(x2i, x2) / (2 * self.sigma[i]**2)
-            loss2 = self.lossfunc(x2i, x ) / (2 * self.sigma[i]**2)
-            lossi = loss1 + 0.1 * loss2
-            if do_backprop: lossi.backward()
-            loss += lossi
-        return loss / len(self.resnet.net)
-
-class ScoreMatchingWrapper_Conditional(ScoreMatchingWrapper):
-
+            self.resnet.net[i].eta = (1/T)**0.5
+            self.resnet.net[i].dt  = (1/T)
+        
     def train(self, x, mask, do_backprop=True):
-        loss = torch.zeros(1, device=x.device, dtype=x.dtype)
-        b_prob = self.sigma / self.sigma.max()
-        for i in range(len(self.resnet.net)):
-            #x1 = x + mask*self.sigma[i+1]*torch.randn_like(x)
-            #x2 = x + mask*self.sigma[i  ]*torch.randn_like(x)
-            x1 = ( x + mask*self.sigma[i+1]*_bnoise(x,b_prob[i  ])*torch.randn_like(x) ) * (1 - mask*_bnoise(x,b_prob[i  ]))
-            x2 = ( x + mask*self.sigma[i  ]*_bnoise(x,b_prob[i+1])*torch.randn_like(x) ) * (1 - mask*_bnoise(x,b_prob[i+1]))
-            x2i = self.resnet.net[i](x1, ~mask)
-            losses = []
-            losses.append( self.lossfunc(x2i, x2) / (2 * self.sigma[i]**2) ) # score matching loss
-            losses.append( 0.5 * self.lossfunc(self.resnet.net[i](x, ~mask), x ) / (2 * self.sigma[i]**2) ) # identity loss
-            losses.append( 0.5 * self.lossfunc(x2i, self.resnet.net[i](x2i, ~mask)) / self.sigma[i] ) # idempotence loss
-            lossi = sum(losses)
-            if do_backprop: lossi.backward()
-            loss += lossi
-        return loss / len(self.resnet.net)
+        n, loss, T = len(self.resnet.net), 0, self.T
+        for i in range(n):
+            t, gnoise = T * (i/n) , torch.randn_like(x)
+            x1 = x * (1 - t/T) + gnoise * (t/T)**0.5
+            xi = self.resnet.net[i](x1, ~mask)
+            # reparameterized regression loss
+            u_ref = (t**0.5 / T) * x - gnoise / T**0.5
+            u_inf = t**0.5 * (xi - x1)
+            lossi = ( (u_ref - u_inf).pow(2) ).mean() # VM loss, normalized
+            if do_backprop: lossi.backward() # block-wise only backpropagation
+            loss = loss + lossi.detach() / n
+        return loss
 
 # latent space conditional denoiser
-class ScoreMatchingWrapper_LatentConditional(ScoreMatchingWrapper):
+class ScoreMatchingWrapper_LatentConditional(DiffusionBlocksWrapper):
 
     def __init__(self, resnet, lossfunc, ae, sigma0=1e-3, sigma1=10, p_mean=1.2, p_std=1.2):
         super().__init__(resnet, lossfunc, sigma0, sigma1, p_mean, p_std)
@@ -150,9 +209,7 @@ class ScoreMatchingWrapper_LatentConditional(ScoreMatchingWrapper):
 class FixedRescaler(nn.Module):
     # A very basic feature normalizer that uses statistics of the first input batch.
     def __init__(self, data=None, eps=1e-5):
-        super().__init__()
-        self.initialized = False
-        self.eps = eps
+        super().__init__(); self.initialized = False; self.eps = eps
         if data is not None: self.initialize(data)
     def initialize(self, x):
         self.register_buffer('mean', x.mean(0, keepdims=True).detach().clone())
@@ -167,6 +224,22 @@ class FixedDescaler(nn.Module):
         self.fr = fixedrescaler
     def forward(self, x):
         return (x * self.fr.sq_v) + self.fr.mean
+
+class FixedRescaler_mm(nn.Module):
+    def __init__(self, data=None, eps=1e-5):
+        super().__init__(); self.initialized = False; self.eps = eps
+        if data is not None: self.initialize(data)
+    def initialize(self, x):
+        self.register_buffer('min', x.amin(0, keepdims=True).detach().clone())
+        self.register_buffer('max', x.amax(0, keepdims=True).detach().clone())
+        self.initialized = True
+    def forward(self, x):
+        if not self.initialized: self.initialize(x)
+        return 2 * (x - self.min)/(self.max - self.min) - 1
+class FixedDescaler_mm(nn.Module):
+    def __init__(self, fixedrescaler):
+        super().__init__(); self.fr = fixedrescaler
+    def forward(self, x): return 0.5*(x + 1)*(self.fr.max - self.fr.min) + self.fr.min
         
         
 
