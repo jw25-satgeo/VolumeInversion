@@ -3,6 +3,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import repeat
 
+# Schedule On the Fly: Diffusion Time Prediction for Faster and Better Image Generation (Ye et al. 2025) @ https://arxiv.org/html/2412.01243v3
+class StepNet(nn.Module):
+    '''
+    A wrapper for predicting reverse diffusion timesteps from data.
+    '''
+    def __init__(self, net, schedf):
+        super().__init__()
+        self.net = net
+
+    def forward(self, x): # 0 < t < 1
+        t1 = torch.sigmoid(self.net(x))
+        return t1
+
+    def loss_fn(self, x, dt):
+        return (dt - self.forward(x)).pow(2).mean()
+
 # Continuous Diffusion for Mixed-Type Tabular Data @ https://arxiv.org/html/2312.10431v1
 #  src @  https://github.com/muellermarkus/cdtd/blob/main/layers/timewarping.py
 class Timewarp_Logistic(nn.Module):

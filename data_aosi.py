@@ -95,7 +95,7 @@ class Dataset():
             dtn = dt.strftime(self.h5_dtstring_fm)
             ddata = torch.stack([torch.as_tensor(self.h5f['scenes'][dtn][f'var_{var}'][()]) for var in self.variables], dim=-1).to(xyz.device, xyz.dtype)
             ddata = scipy_interp(ddata.reshape(-1,len(self.variables)), xyzi.reshape(-1,3), mode=mode)
-            buffer.append(torch.as_tensor(ddata(xyz)).reshape(xyz.shape[0],xyz.shape[1],-1).permute(2,0,1))
+            buffer.append(torch.as_tensor(ddata(xyz.reshape(-1,3))).reshape(xyz.shape[0],xyz.shape[1],-1).permute(2,0,1))
         return torch.stack(buffer, dim=0)
         
     def read_at_torched(self, xyz, datetimes:list, gsi=8, mode='nearest'):

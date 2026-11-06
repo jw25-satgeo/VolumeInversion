@@ -171,26 +171,27 @@ class LatticeSolver(torch.nn.Module):
         N,C,Li,Wi,Di = ox.shape
         dtype,device = ox.dtype, ox.device
         ts_pad = tuple([ts_samp[i//2]//2 for i in range(5,-1,-1)])
+        ts_padv = (ts_pad[0],ts_pad[1],0,0,0,0)
         
         xS = ox.clone(); xS[xS < 0] = 0
-        xS = F.avg_pool3d(F.pad(xS, ts_pad, mode='reflect'), ts_samp) # mean downsampled salinity
-        yS = F.avg_pool3d(F.pad(S, ts_pad[:2], mode='reflect'), (1,1,ts_samp[-1]))
-        yT = F.avg_pool3d(F.pad(T, ts_pad[:2], mode='reflect'), (1,1,ts_samp[-1]))
+        xS = F.avg_pool3d(F.pad(xS, ts_pad, mode='circular'), ts_samp) # mean downsampled salinity
+        yS = F.avg_pool3d(F.pad(S, ts_padv, mode='circular'), (1,1,ts_samp[-1]))
+        yT = F.avg_pool3d(F.pad(T, ts_padv, mode='circular'), (1,1,ts_samp[-1]))
         Lj,Wj,Dj = xS.shape[2:]
         Tn, Sn = self.TSnorm(yT, xS)
         
         ts_input = torch.stack((torch.zeros_like(Sn), Sn, Tn.expand(-1,C,Lj,Wj,-1)), dim=-1).view(N*C,Lj,Wj,Dj,3) # 0,S,T in samp xyz -> T,S,0 in ref ijk
         ts_grid = self.ts_grid_d3base[0].expand(N*C,-1,-1,-1,-1) #N*C,1,tc,sc,1  .. to preserve ts_input C dim, collapse to batch dim
         # COMMENT - ts_grid_d3base[1] brine salinity balance is ignored : salinity transport should occur dynamically
-        ybf = 1 - F.grid_sample(ts_grid, ts_input).reshape(N,C,Lj,Wj,Dj) #N*C,1,Lj,Wj,Dj to N,C,Lj,Wj,Dj
-        xbf = F.avg_pool3d(F.pad(ox > 0, ts_pad, mode='reflect').to(dtype), ts_samp)
+        ybf = 1 - F.grid_sample(ts_grid, ts_input, align_corners=False).reshape(N,C,Lj,Wj,Dj) #N*C,1,Lj,Wj,Dj to N,C,Lj,Wj,Dj
+        xbf = F.avg_pool3d(F.pad((ox > 0).to(ox.dtype), ts_pad, mode='circular').to(dtype), ts_samp)
         del(Tn, Sn, ts_grid, ts_input)
         
         dS = F.interpolate(yS - xS, size=(Li,Wi,Di), mode='trilinear')
         dbf = F.interpolate(ybf - xbf, size=(Li,Wi,Di), mode='trilinear')
         return dS, dbf
 
-    def PCF(self, ox, px, T, ts_samp=(15,15,3), max_percolations=200):
+    def PCF(self, ox, T, ts_samp=(15,15,3), max_percolations=200, an_T=0):
         '''
         Calculates the discrepancy between lattice cluster and empirical cluster properties in current T-S conditions.
         input
@@ -206,149 +207,148 @@ class LatticeSolver(torch.nn.Module):
         N,C,Li,Wi,Di = ox.shape
         dtype,device = ox.dtype, ox.device
         ts_pad = tuple([ts_samp[i//2]//2 for i in range(5,-1,-1)])
+        ts_padv = (ts_pad[0],ts_pad[1],0,0,0,0)
 
         # porosity (inclusive of brine & gas inclusions)
-        xP = F.avg_pool3d(F.pad(ox != 0, ts_pad, mode='reflect').to(dtype), ts_samp)
-        Lj,Wj,Dj = xP.shape[2:]
+        xP = F.avg_pool3d(F.pad((ox != 0).to(ox.dtype), ts_pad, mode='circular').to(dtype), ts_samp, stride=1)
 
         # melt-growth-transition mapping
-        yT = F.avg_pool3d(F.pad(T, ts_pad[:2], mode='reflect'), (1,1,ts_samp[-1]))
-         # T_eq assumption : all points as linear (2-point mean value) between window extrema
-        yT_eq = F.pad((yT[...,ts_samp[2]//2:] + yT[...,:-ts_samp[2]//2]) / (ts_samp[2] - 1), ts_pad[:2], mode='replicate')
-        NES = yT - yT_eq; NES /= F.pad(torch.var(NES.unfold(dim=-1,size=ts_samp[2],step=1), dim=-1)**0.5, ts_pad[:2], mode='replicate')
+        yT = F.avg_pool3d(F.pad(T, ts_padv, mode='circular'), (1,1,ts_samp[-1]))
+         # T_eq assumption : force all points to be linear (2-point mean value) between window extrema
+        yT_eq = F.pad((yT[..., :-2*(ts_samp[2]//2)] + yT[..., 2*(ts_samp[2]//2):]) / 2, ts_padv, mode='circular')
+        NES = yT - yT_eq; NES /= F.pad(torch.var(NES.unfold(-1,ts_samp[2],1), dim=-1)**0.5, ts_padv, mode='circular') + 1e-6
         # positive/negative NES : melting/growing
         # is melt : melt boundary @ positive NES, source @ top and bottom
-        p_m = torch.cumsum(F.softmax(NES, dim=-1), dim=-1); p_m /= p_m[..., -1]
-        p_m = torch.mean(p_m, dim=-1, keep_dim=True) * (1 - p_m * (1 - p_m))**p_m.sum(dim=-1, keep_dim=True)
+        p_m = torch.cumsum(F.softmax(NES, dim=-1), dim=-1); p_m = p_m / p_m[..., -1]
+        p_m = torch.mean(p_m, dim=-1, keepdim=True) * (1 - p_m * (1 - p_m))**p_m.sum(dim=-1, keepdim=True)
         # is growth : melt boundary @ negative NES, source @ bottom
-        p_g = torch.cumsum(F.softmax(-NES, dim=-1), dim=-1); p_g /= p_g[..., -1]
-        p_g = torch.mean(p_g, dim=-1, keep_dim=True) * p_g
+        p_g = torch.cumsum(F.softmax(-NES, dim=-1), dim=-1); p_g = p_g / p_g[..., -1]
+        p_g = torch.mean(p_g, dim=-1, keepdim=True) * p_g
         
         # using Chebyshev connectivity, explore connectivity of a random brine cell.
         poro = (ox != 0)
         percol = ((torch.rand((1,1,Li,Wi,Di),device=device) < 0.1) * poro).to(torch.int16) # select with 10% chance a gas or brine cell
         ids = torch.cumsum(percol.view(N,C,-1), dim=-1).view(N,C,Li,Wi,Di); percol *= ids # assign dense unique ID within each (N,D)
-        for i in range(max_percolations): percol = poro * F.max_pool3d(percol, 3, 1, 1)
+        for i in range(max_percolations): percol = poro * F.max_pool3d(percol.half(), 3, 1, 1).short()
 
         percos = percol > 0; dss = percos.to(torch.int16); dss[torch.cumsum(dss, axis=-1)==1] = 2; dss -= max_percolations;
-        for i in range(max_percolations): tmp = F.max_pool3d(-dss, 3, 1, 1); dss[tmp > dss] = tmp + 1
+        for i in range(max_percolations): tmp = F.max_pool3d(-dss.half(), 3, 1, 1).short(); m = tmp > dss; dss[m] = tmp[m] + 1
 
         # clusters are given an energetic favorability proportional to their size relative to the local cluster strength.
-        dCS = torch.zeros_like(percol); poroc = poro.sum(dim=(-3,-2,-1), keepdim=True)
-        for i in range(ids[...,-1].max()):
+        dCS = torch.zeros_like(percol.to(ox.dtype)); poroc = poro.sum(dim=(-3,-2,-1), keepdim=True)
+        for i in range(1, ids[...,-1].max()):
             cluster = (percol == i); cl_n = cluster.sum(dim=(-3,-2,-1), keepdim=True)
-            gs_p = ((px * cluster).sum(dim=(-2,-3,-4), keepdim=True) / cl_n).view(N*C,1,1,1,3).flip(dims=(-1,)) #ijk to xyz
-            cs_xP = F.grid_sample(xP.view(N*C,1,Lj,Wj,Dj), gs_p, mode='trilinear').view(N,C,1,1,1) # retrieve local porosity
-            targ_cl_s = (cs_xP - 0.002)**0.82 # Maus et al. empirical relation for isotropic percolation
-
+            targ_cl_s = ((xP * cluster) - 0.002).clamp_min(0)**0.82 # Maus et al. empirical relation for isotropic percolation from porosity
             # tortuosity approximation
             #tort = cluster.any(dim=(-3,-2), keepdim=True)
-            
-            dCS += cluster * torch.exp(-((cl_n / poroc) - targ_cl_s)**2)  # migration probability is high when cluster strength is not at expectation
-
+            dCS += cluster * ((cl_n / poroc) - targ_cl_s)  # difference of observed & expected cluster strength
+        
         # diffuse cluster potential via multiple gaussian convolutions
         wind = torch.meshgrid(*[torch.arange(e) - e//2 for e in ts_samp], indexing='ij')
-        wind = torch.exp(-0.125*(wind[0]**2 + wind[1]**2 + wind[2]**2))[None,None,...]
-        for i in range(3): dCS = F.conv3d(dCS.view(N*C,1,Li,Wi,Di), wind, padding=ts_pad)
+        wind = torch.exp(-0.125*(wind[0]**2 + wind[1]**2 + wind[2]**2))[None,None,...].to(dCS.device); wind /= wind.sum()
+        for i in range(3): dCS = F.conv3d(F.pad(dCS.view(N*C,1,Li,Wi,Di), ts_pad, mode='circular'), wind)
         
         return dCS#, tort
     
-    def anneal_step(self, x, T, S, ts_samp=(15,15,3)):
+    def anneal(self, x, T, S, ts_samp=(15,15,3), iters=1, schedule='linear', verbose=False):
         '''
-        Perform inplace annealing optimization on a D3Q7 lattice.
+        Perform inplace annealing optimization on a 3D lattice.
         -- input
         x : (N, C, L, W, D) float tensor with +2 boundary pad in 3 dimensions
         T : (N, 1, 1, 1, Di) float tensor - reference temperature (variable)
         S : (N, 1, 1, 1, Di) float tensor - reference salinity
         '''
+        if (np.array(ts_samp) % 2 == 0).any(): raise ValueError("window must be odd length in all dimensions.")
+        dtype, device = x.dtype, x.device
         N,C,L,W,D = x.shape
         Li,Wi,Di = L-2,W-2,D-2 # boundary-excluding sizes
-        dtype, device = x.dtype, x.device
-        if ((np.array(ts_samp)/2 - np.array(ts_samp)//2) != 0).any():
-            raise ValueError("window must be odd length in all dimensions.")
-            
         ox = x[...,1:-1,1:-1,1:-1] # slice only : is direct reference
-        # coordinate grid for shift-based access
-        px = torch.stack(torch.meshgrid(    # N,C,Li,Wi,Di,3
-            torch.arange(1, L-1, dtype=torch.int32, device=device),
-            torch.arange(1, W-1, dtype=torch.int32, device=device),
-            torch.arange(1, D-1, dtype=torch.int32, device=device),
-            indexing='ij'
-        ),dim=-1)[None,None,...].expand(N,C,-1,-1,-1,-1)
-        
-        # calculate thermophysical potential
-        dS, dbf = self.TSF(ox, T, S, ts_samp)
-        pbf = torch.tanh(dbf); del(dbf)
-        # calculate network potential
-        dCS = self.PCF(ox, px, T, ts_samp, max_percolations = ox.shape[-1]*2)
-        pCS = torch.sigmoid(dCS); del(dCS)
-        # interaction kinetic
-        bar = torch.exp(-torch.softplus(-T))
-        bar = 1 - bar*(torch.randn_like(ox) + 1)
-        del(px)
-        
-        for i in torch.randperm(self.shift_ops.shape[0]):
-            opd = self.shift_ops[i]
-            oy = x.narrow(2, opd[0]+1, Li).narrow(3, opd[1]+1,Wi).narrow(4, opd[2]+1,Di)
+        match schedule:
+            case 'linear' : schedule = lambda x : 1 - x
+            case 'cosine' : schedule = lambda x : (1 + torch.cos(torch.pi*x))/2
+        # simulated annealing process
+        beta = 1
+        for j in range(iters):
+            # annealing temperature
+            an_T = schedule(j / iters)
+            # thermophysical potential
+            dS, pbf = self.TSF(ox, T, S, ts_samp)
+            pbf_p = torch.exp(beta * -pbf.clamp(min=0) / an_T).clamp(max=1)
+            pbf_n = torch.exp(beta * -pbf.clamp(max=0) / an_T).clamp(max=1)
+            if verbose: print('pbf+ step', j ,':', pbf_p.min(), pbf_p.mean(), pbf_p.max())
+            if verbose: print('pbf- step', j ,':', pbf_n.min(), pbf_n.mean(), pbf_n.max())
+            # pore network potential
+            pCS = self.PCF(ox, T, ts_samp, max_percolations = ox.shape[-1]*2)
+            pCS = torch.exp(beta * pCS / an_T).clamp(max=1)
+            if verbose: print('pCS step', j ,':', pCS.min(), pCS.mean(), pCS.max())
+            # perturbation
+            bar = torch.rand_like(ox)
+            if verbose: print('---')
+
+            # -- proposed state
+            sx = ox.clone() # target to alter
+            sy = 0 #fill with paired neighbour
+            # ... simulate a single interaction per randomly selected pair (shift actions) -> (change actions)
             
-            # interaction masks
-            m_tp, m_bt, m_hz = (oy == -999), (oy == -998), (oy == -997)
-            #ymnb = ~(m_tp | m_bt | m_hz) # interior / not-boundary mask
-            xmi, xmb, xmg = (ox == 0), (ox >  0), (ox <  0)
-            ymi, ymb, ymg = (oy == 0), (oy >  0), (oy <  0)
             
-            # ---------- ice-ice ---------- #
-            fm = xmi & ymi
-            # .. spontaneous melting
-            fmm = fm & (pbf**3 > bar)
-            ox[fmm] += 1e-8
-            
-            # ---------- brine-air ---------- #
-            fm = xmb & ymg
-            # .. air rising
-            if opd[-1] > 0: # y.z > x.z
-                tx = ox[fm].clone()
-                ox[fm], oy[fm] = oy[fm], tx
-            # .. horizontal brine travel
-            if opd[-1] == 0:
+            for i in torch.randperm(self.shift_ops.shape[0]):
+                opd = self.shift_ops[i]
+                oy = x.narrow(2, opd[0]+1, Li).narrow(3, opd[1]+1,Wi).narrow(4, opd[2]+1,Di)
+                
+                # interaction masks
+                m_tp, m_bt, m_hz = (oy == -999), (oy == -998), (oy == -997) # boundary masks
+                xmi, xmb, xmg = (ox == 0), (ox >  0), (ox <  0) & ~(m_tp | m_bt | m_hz)
+                ymi, ymb, ymg = (oy == 0), (oy >  0), (oy <  0) & ~(m_tp | m_bt | m_hz)
+                
+                # ---------- ice-ice ---------- #
+                fm = xmi & ymi
+                # 1 .. spontaneous melting
+                fmm = fm & (pbf_p**5 > bar)
+                ox[fmm] += 1e-8
+                
+                # ---------- brine-air ---------- #
+                fm = xmb & ymg
+                # 1 .. air rising
+                if opd[-1] > 0: # y.z > x.z
+                    tx = ox[fm].clone()
+                    ox[fm], oy[fm] = oy[fm], tx
+                # 2 .. horizontal brine travel
+                if opd[-1] == 0:
+                    fmm = fm & (0.5 > bar)
+                    tx = ox[fmm].clone()
+                    ox[fmm], oy[fmm] = oy[fmm], tx
+                    
+                # ---------- ice-brine ---------- #
+                fm = xmi & ymb
+                # 1 .. ice melting
+                fmm = fm & (pbf_p > bar)
+                oy[fmm] = oy[fmm] / 2
+                ox[fmm] = oy[fmm]
+                # 2 .. brine migration
                 fmm = fm & (pCS > bar)
                 tx = ox[fmm].clone()
                 ox[fmm], oy[fmm] = oy[fmm], tx
-                
-            # ---------- ice-brine ---------- #
-            fm = xmi & ymb
-            # .. ice melting
-            fmm = fm & (pbf > bar)
-            oy[fmm] = oy[fmm] / 2
-            ox[fmm] = oy[fmm]
-            # .. brine migration
-            fmm = fm & (pCS > bar)
-            tx = ox[fmm].clone()
-            ox[fmm], oy[fmm] = oy[fmm], tx
-
-            # ---------- brine-brine ---------- #
-            fm = xmb & ymb
-            # .. brine freezing
-            fmm = fm & (pbf < -bar)
-            oy[fmm] = ox[fmm] + oy[fmm]
-            ox[fmm] = 0
-            # .. displacement
-            if opd[-1] > 0:
-                fmm = fm & (oy < ox) # y below fresher than x above
-                tx = ox[fmm].clone()
-                ox[fmm], oy[fmm] = oy[fmm], tx
-            # .. equalization
-            fmm = fm & (bar < 0.25)
-            ox[fmm] = (ox[fmm] + oy[fmm]) / 2
-            oy[fmm] =  ox[fmm]
-
-            # ---------- brine-edge ---------- #
-            fm = xmb & (m_bt | m_hz)
-            # .. edge salt flux
-            ox[fm] += dS[fm] * (1 - bar[fm]).clamp(0, 1)
-
-
-
+    
+                # ---------- brine-brine ---------- #
+                fm = xmb & ymb
+                # 1 .. brine freezing
+                fmm = fm & (pbf_n > bar)
+                oy[fmm] = ox[fmm] + oy[fmm]
+                ox[fmm] = 0
+                # 2 .. saline displacement
+                if opd[-1] > 0:
+                    fmm = fm & (oy < ox) # y below fresher than x above
+                    tx = ox[fmm].clone()
+                    ox[fmm], oy[fmm] = oy[fmm], tx
+                # .. saline equalization
+                fmm = fm & (bar < 0.25)
+                ox[fmm] = (ox[fmm] + oy[fmm]) / 2
+                oy[fmm] =  ox[fmm]
+    
+                # ---------- brine-edge ---------- #
+                fm = xmb & (m_bt | m_hz)
+                # 1 .. mass-balance bottom salt flux
+                ox[fm] += dS[fm] * (1 - bar[fm]).clamp(0, 1)
 
     #def roughen(self, x, b):
     #    '''

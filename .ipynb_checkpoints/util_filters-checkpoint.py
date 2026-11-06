@@ -15,19 +15,25 @@ def nanpute_n1mean(x: torch.Tensor, max_iters=None, dims=(0,1)) -> torch.Tensor:
         for dim in dims: _x, _v = _x.unfold(dim,3,1), _v.unfold(dim,3,1) # restores padded dimension to orig
         x[nv] = torch.where(_v[nv], _x[nv], 0).flatten(-len(dims)).sum(-1) / _v[nv].flatten(-len(dims)).sum(-1)
     return x
-        
+
+
+def gauss_filter(x: torch.Tensor, window_size: tuple, sigma: float = None) -> torch.Tensor:
+    """Apply a per-channel gaussian smoothing filter over the spatial dimensions.
+        x: Input tensor of shape ``(B, C, H, W)``.
+        window_size: Odd integer side length of the smoothing window.
+    """
+    pad, sigma, c = (window_size[0]//2, window_size[1]//2), (window_size[0]/6, window_size[1]/6) if (sigma is None) else sigma, x.shape[1]
+    x_padded = F.pad(x, (pad[0], pad[0], pad[1], pad[1]), mode='reflect')
+    kern = torch.meshgrid(torch.arange(window_size[1]), torch.arange(window_size[0]), indexing='ij')
+    kern = torch.exp(-sum([(kern[i] - window_size[i])/(2*sigma[i]**2) for i in (0,1)])).to(x.device, x.dtype); kern /= kern.sum()
+    return F.conv2d(x_padded, kern[None,None,:,:].expand(c, 1, window_size[1], window_size[0]), groups=c)
 
 # -- LEE FILTER (src : https://github.com/torchgeo/torchgeo/blob/e0b255d52f23e689c5d2a278776f4eb3b5498f32/torchgeo/transforms/sar.py#L97)
 
-def _box_filter(x: torch.Tensor, window_size: int) -> torch.Tensor:
+def box_filter(x: torch.Tensor, window_size: int) -> torch.Tensor:
     """Apply a per-channel box (mean) filter over the spatial dimensions.
-
-    Args:
         x: Input tensor of shape ``(B, C, H, W)``.
         window_size: Odd integer side length of the smoothing window.
-
-    Returns:
-        Smoothed tensor of identical shape.
     """
     pad = window_size // 2
     x_padded = F.pad(x, (pad, pad, pad, pad), mode='reflect')

@@ -59,19 +59,22 @@ class CSDE(nn.Module): # conditional stochastic SDE sampler
 # desc  -  A transformer stack performs token denoising operations in each optimally projected subspace given to its attention heads.
 class r1PA_block(nn.Module): # residual single projection multi-head subspace attention : MHSA block
     
-    def __init__(self, h=4, dim=16, channels=1, activation='sigmoid', bias=True):
+    def __init__(self, h=4, dim=16, channels=1, activation='sigmoid', bias=True, residual=True):
         super().__init__()
         self.h = h
         self.act = nn_util.get_act(activation)
         self.beta = nn.Parameter(torch.ones(1, requires_grad=True))
         self.P_q = nn.Linear(dim*channels, h*dim*channels, bias=bias)
+        self.residual = residual
         
     def forward(self, x): # accepts (B,C,N) where (B,N) should be expanded to (B,1,N).
         B,C,N = x.shape
         X = F.layer_norm(x, (C,N))
-        X1 = self.P_q(X.view(B,-1)).reshape(B,self.h,C,N) #B,h,C,N
+        X1 = self.P_q(X.view(B*C,-1)).reshape(B,self.h,C,N) #B,h,C,N
         X1 = self.act(self.beta * X1 @ X1.transpose(-1,-2)) @ X1
-        return x + X1.sum(dim=1)#self.P_o(X1.view(B,-1)).reshape(B,C,N)
+        z = X1.sum(dim=1)#self.P_o(X1.view(B,-1)).reshape(B,C,N)
+        if self.residual: return x + z
+        return z
 
 # linear bottlenecked attention
 class r2PA_block(nn.Module):
@@ -90,9 +93,9 @@ class r2PA_block(nn.Module):
         
     def forward(self, x):
         B,C,N = x.shape
-        z = self.P_q(F.layer_norm(x, (C,N)).view(B,-1)).reshape(B,self.h,C,self.hd) # project query & split heads
+        z = self.P_q(F.layer_norm(x, (C,N)).view(B*C,-1)).reshape(B,self.h,C,self.hd) # project query & split heads
         z = self.act(self.beta * z @ z.transpose(-1,-2)) @ z
-        z = self.P_o(z.view(B,-1)).view(B,C,N)
+        z = self.P_o(z.view(B*C,-1)).view(B,C,N)
         if self.residual: return x + z
         return z
 

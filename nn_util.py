@@ -37,6 +37,37 @@ class Clamp(nn.Module):
     def forward(self, x):
         return torch.clamp(x, self.minc, self.maxc)
 
+# Online Normalization for Training Neural Networks (Chiley et al. 2019) @ https://arxiv.org/abs/1905.05894v3
+# use of Welford's algorithm .. Streaming Deep Reinforcement Learning Finally Works (Elsayed et al. 2026) @ https://arxiv.org/html/2410.14606v3
+# Note on a method for calculating corrected sums of squares and products. (Welford, 1962) @ https://doi.org/10.1080/00401706.1962.10490022
+# Updating Formulae and a Pairwise Algorithm for Computing Sample Variances (Chan et al. 1979) @ https://doi.org/10.1007/978-3-642-51461-6_3
+class RunningStat(nn.Module):
+    '''An online statistics descriptor adapting Chan's variant of Welford's algorithm. Accepts (B, d...) format.'''
+    def __init__(self, n_vars):
+        super().__init__()
+        self.register_buffer('n', torch.zeros(1))
+        self.register_buffer('tse', torch.zeros(n_vars))
+        self.register_buffer('mean', torch.zeros(n_vars))
+
+    def var(self): return self.tse / self.n
+    def bessel_var(self): return self.tse / (self.n - 1)
+
+    def update(self, x):
+        x1 = x.flatten(1) # (B, d...) tensor
+        bm, bv, bn = x1.mean(0), x1.var(0), x1.shape[0]
+        delta , _n = bm - self.mean, self.n
+        self.mean += delta * bn / (_n+bn)
+        self.tse  += (bv * (bn - 1)) + delta**2 * _n*bn/(_n+bn)
+        self.n    += bn
+    
+    def single_update(self, x):
+        assert len(x.shape) == 0
+        mean0 = self.mean
+        self.n += 1
+        self.mean += (x - self.mean) / self.n
+        self.tse  += (x - mean0) * (x - self.mean)
+# ..........
+
 class Linear_T(nn.Module):
     def __init__(self, linearLayer, fslice=None):
         super().__init__()

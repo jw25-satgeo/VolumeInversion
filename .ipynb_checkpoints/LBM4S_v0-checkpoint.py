@@ -3,6 +3,19 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+'''
+Lattice Boltzmann 4 Scattering v0
+--
+IMPLEMENTATION BASIS / SOURCE:
+ Lattice Boltzmann Method for Electromagnetic Wave Scattering (Khan et al. 2025)
+  @  https://doi.org/10.48550/arXiv.2510.11042
+  
+'''
+
+# -- to research? --
+#  Highly accurate simplified lattice Boltzmann method @ https://pubs.aip.org/aip/pof/article/30/10/103605/989749/Highly-accurate-simplified-lattice-Boltzmann
+
+
 def get_scat_coeff(plane_reader, driver, kI, single_pixel=True, ignore_H=True):
     '''
     Retrieve 2D plane of complex scattering coefficients from LBM simulation results.
